@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { loadConfig, toKakaoError, programArgs, installRoot } from '@kakao-max/core';
+import { loadConfig, toKakaoError, programArgs, installRoot, KakaoError } from '@kakao-max/core';
 import { resolveRoom } from './room-resolution.ts';
 import { randomUUID } from 'node:crypto';
 import { sendMessage, sendPhotos, submitWrite, approvalLink } from './agent-send-client.ts';
@@ -12,6 +12,7 @@ import { readRoomSmokeAccess } from './smoke-read-scope.ts';
 import { runChatShell } from './chat-shell.ts';
 import { runTerminalMessenger } from './terminal-messenger.ts';
 import { messageAttachments, mediaTypeName, parseMediaType } from './attachments.ts';
+import { COMMANDS, parseCommand, type CliContext } from './commands.ts';
 
 // ----------------------------------------------------------------------------
 // CLI and terminal messenger share the daemon's MCP policies and connection.
@@ -422,6 +423,38 @@ async function cmdSearch(query: string, targetArg?: string, readGrantId?: string
   }
 }
 
+/** A command from commands.ts: one daemon tool, its JSON result printed as is. */
+async function cmdTool(name: string, argv: string[]) {
+  const { command, args, values, requestId = randomUUID() } = parseCommand(name, argv);
+  const mcp = new McpClient({ host: MCP_HOST, port: MCP_PORT });
+  try { await mcp.connect(); }
+  catch (e) {
+    console.error(`${c.red}❌ 카카오톡 MCP 데몬(${MCP_HOST}:${MCP_PORT})에 연결할 수 없습니다.${c.reset} ${c.dim}${(e as Error).message}${c.reset}`);
+    process.exit(1);
+  }
+  const cli: CliContext = {
+    requestId,
+    call: (tool, toolArgs = {}) => mcp.callTool(tool, toolArgs),
+    write: (tool, toolArgs, kind) => submitWrite(mcp, tool, { ...toolArgs, requestId }, kind),
+    async room(target) {
+      const chat = resolveRoom((await mcp.callTool('list_chats')).chats || [], target);
+      if (!chat) throw new KakaoError('NOT_FOUND', `대화방을 찾을 수 없습니다: "${target}" ('kakao ls' 또는 'kakao find-room' 으로 확인)`);
+      return chat.id;
+    }
+  };
+  try {
+    console.log(JSON.stringify(await command.run(cli, args, values), null, 2));
+  } catch (e: any) {
+    process.exitCode = 1;
+    if (['APPROVAL_REQUIRED', 'SEND_OUTCOME_UNKNOWN', 'MUTATION_OUTCOME_UNKNOWN'].includes(e.code)) reportWriteError(e, requestId);
+    else if (command.group && /^unknown tool:/.test(e.message)) {
+      // A tool in a group the daemon did not enable is not listed at all.
+      console.log(`${c.red}❌ ${e.message}${c.reset}`);
+      console.log(`${c.gray}이 명령은 데몬의 '${command.group}' 도구 묶음이 필요합니다 (KAKAO_MCP_TOOL_GROUPS).${c.reset}`);
+    } else console.log(`${c.red}❌ [${e.code ?? '오류'}]${c.reset} ${e.message}`);
+  } finally { mcp.close(); }
+}
+
 // Read-only smoke test against the live MCP daemon. Never sends, restores, or writes;
 // every check asserts on real data and the process exits non-zero on any failure.
 async function cmdTest(groupOnly = false, chatId?: string) {
@@ -571,6 +604,9 @@ ${c.bold}사용 가능한 명령어:${c.reset}
   ${c.cyan}kakao web${c.reset}                               내 브라우저용 로컬 웹 화면 시작
   ${c.cyan}kakao approver${c.reset} enroll|list|remove <id>     승인 패스키 관리(데몬 서버 터미널)
 
+${c.bold}데몬 도구 명령어${c.reset} ${c.gray}(결과는 JSON, [묶음]은 KAKAO_MCP_TOOL_GROUPS 필요):${c.reset}
+${Object.values(COMMANDS).map(cmd => `  ${c.cyan}kakao ${cmd.usage}${c.reset}\n      ${cmd.summary}${cmd.group ? ` ${c.gray}[${cmd.group}]${c.reset}` : ''}`).join('\n')}
+
 ${c.bold}대화방 지정 옵션 (<대화방>):${c.reset}
   • ${c.yellow}#1, #2, #3...${c.reset} 'kakao ls' 번호. 정확한 Chat ID가 번호보다 우선
   • 수동 접근 방 열람은 사람이 승인한 읽기 허가의 --read-grant <id> 필요 (스모크는 승인하지 않음)
@@ -686,6 +722,8 @@ async function main() {
       if (!cmd) {
         // Default to ls if no command given
         await cmdList();
+      } else if (Object.hasOwn(COMMANDS, cmd)) {
+        await cmdTool(cmd, args);
       } else {
         console.error(`${c.red}알 수 없는 명령어: ${cmd}${c.reset}`);
         cmdHelp();

@@ -5,20 +5,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { KakaoDeviceRegistration, type SignRegistrationResult } from '@kakao-max/protocol';
-import { KakaoError } from '@kakao-max/core';
+import { KakaoError, isMainModule, installRoot, packagedEntry, programArgs } from '@kakao-max/core';
 import { confirmSetup, terminalPrompt, type SetupPrompt } from './setup-prompts.ts';
 import { probe } from './healthcheck.ts';
 import { parseEnv } from '../../../packages/core/src/env-file.ts';
+import { installRelease, readRelease, releaseDigest, releaseFiles, releaseLabel, RELEASE_DIGEST, RELEASE_VERSION, type Release } from './release.ts';
 
 const SERVICE = 'kakao-max';
 function present(file: string): boolean {
   try { fs.lstatSync(file); return true; }
   catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e; }
 }
-interface InstallState { version: 1; commit: string; phase: 'building' | 'prepared' | 'configured' | 'running'; port?: number; deviceUuid?: string }
+type Phase = 'building' | 'prepared' | 'configured' | 'running';
+/** version 1 pins a Git commit of a source checkout; version 2 pins a published package release. */
+export type InstallState =
+  | { version: 1; commit: string; phase: Phase; port?: number; deviceUuid?: string }
+  | { version: 2; release: string; digest: string; phase: Phase; port?: number; deviceUuid?: string };
 export interface BootstrapHost {
   repo: string; root: string; unitFile: string; node: string; npm: string;
   run(program: string, args: string[], allowFailure?: boolean, cwd?: string): string;
@@ -31,6 +35,8 @@ export interface BootstrapHost {
   operatorUid?: number;
   /** Internal isolation for explicit OS tests; the CLI always uses kakao-max. */
   serviceName?: string;
+  /** Install this published package release instead of the Git checkout at `repo`. */
+  release?: Release;
 }
 
 function ownerPath(file: string, directory = false, uid = process.getuid?.()): void {
@@ -51,7 +57,7 @@ function writePrivate(file: string, text: string, uid = process.getuid!(), gid =
   try { fs.fsyncSync(parent); } finally { fs.closeSync(parent); }
 }
 
-export function serviceUnit(app: string, data: string, node: string, service = SERVICE, description = 'kakao-max account daemon'): string {
+export function serviceUnit(app: string, data: string, node: string, service = SERVICE, description = 'kakao-max account daemon', layout: 'source' | 'package' = 'source'): string {
   if (!/^[a-z][a-z0-9-]{0,30}$/.test(service)) throw new KakaoError('CONFIG_INVALID', 'Invalid service identity');
   for (const value of [app, data, node]) if (!path.isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) {
     throw new KakaoError('CONFIG_INVALID', 'Service paths must be absolute and contain no control characters');
@@ -62,7 +68,7 @@ export function serviceUnit(app: string, data: string, node: string, service = S
     return `"${command ? escaped.replace(/\$/g, () => '$$') : escaped}"`;
   };
   // Unlike ExecStart/ReadWritePaths, WorkingDirectory consumes one path, not a quoted word list.
-  return `[Unit]\nDescription=${description}\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=${service}\nGroup=${service}\nWorkingDirectory=${app.replace(/%/g, '%%')}\nExecStart=${quote(node, true)} --experimental-strip-types apps/mcp/src/index.ts\nRestart=on-failure\nRestartSec=10\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nReadWritePaths=${quote(data)} ${quote(path.join(app, '.env.local'))}\nCapabilityBoundingSet=\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n\n[Install]\nWantedBy=multi-user.target\n`;
+  return `[Unit]\nDescription=${description}\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=${service}\nGroup=${service}\nWorkingDirectory=${app.replace(/%/g, '%%')}\nExecStart=${quote(node, true)} ${programArgs('mcp', { packaged: layout === 'package', relative: true }).join(' ')}\nRestart=on-failure\nRestartSec=10\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nReadWritePaths=${quote(data)} ${quote(path.join(app, '.env.local'))}\nCapabilityBoundingSet=\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n\n[Install]\nWantedBy=multi-user.target\n`;
 }
 
 export function legacyServiceUnit(app: string, data: string, node: string, service = 'kakaotalk-mcp'): string {
@@ -89,12 +95,21 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
   catch { throw new KakaoError('WORKER_IN_USE', 'Another install or an interrupted install holds the lock; inspect it before retrying'); }
   try {
     fs.writeSync(lockFd, `${process.pid}\n`); fs.fsyncSync(lockFd);
+    const pkg = h.release, layout = pkg ? 'package' : 'source';
     // Root must not refresh/rewrite the invoking user's index during a read-only status check.
     const git = (...args: string[]) => h.run('git', ['--no-optional-locks', '-c', `safe.directory=${h.repo}`, '-C', h.repo, ...args]).trim();
-    const commit = git('rev-parse', 'origin/main');
-    if (!/^[a-f0-9]{40}$/.test(commit) || git('rev-parse', 'HEAD') !== commit || git('status', '--porcelain')) {
+    const commit = pkg ? '' : git('rev-parse', 'origin/main');
+    if (pkg) {
+      if (!RELEASE_VERSION.test(pkg.version) || !RELEASE_DIGEST.test(pkg.digest)) throw new KakaoError('CONFIG_INVALID', 'Invalid package release');
+    } else if (!/^[a-f0-9]{40}$/.test(commit) || git('rev-parse', 'HEAD') !== commit || git('status', '--porcelain')) {
       throw new KakaoError('CONFIG_INVALID', 'Bootstrap requires a clean checkout at origin/main. Publish/merge code first; branches are not installed.');
     }
+    const pin = pkg ? releaseLabel(pkg.version, pkg.digest) : commit.slice(0, 12);
+    const pinned = (st: InstallState) => pkg ? st.version === 2 && st.release === pkg.version && st.digest === pkg.digest : st.version === 1 && st.commit === commit;
+    const pinState = (phase: Phase, deviceUuid?: string): InstallState => {
+      const extra = deviceUuid === undefined ? {} : { deviceUuid };
+      return pkg ? { version: 2, release: pkg.version, digest: pkg.digest, phase, port, ...extra } : { version: 1, commit, phase, port, ...extra };
+    };
     const stateFile = path.join(h.root, 'install-state.json'), app = path.join(h.root, 'app'), data = path.join(h.root, 'data');
     let state: InstallState;
     if (fs.existsSync(h.root)) {
@@ -102,12 +117,17 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       const stat = fs.statSync(stateFile);
       if ((stat.mode & 0o077) || stat.size > 4096) throw new KakaoError('STORAGE_UNSAFE', 'Unsafe installer manifest');
       state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      if (state.version !== 1 || !/^[a-f0-9]{40}$/.test(state.commit) || (state.port ?? 8787) !== port || !['building','prepared','configured','running'].includes(state.phase) ||
+      if (pkg ? state.version === 1 : state.version === 2) {
+        throw new KakaoError('CONFIG_INVALID', pkg ? 'This installation was set up from a source checkout; update it from that checkout'
+          : 'This installation was set up from the kakao-max package; update it with kakao-max setup --update');
+      }
+      const validPin = state.version === 1 ? /^[a-f0-9]{40}$/.test(state.commit) : state.version === 2 && RELEASE_VERSION.test(state.release) && RELEASE_DIGEST.test(state.digest);
+      if (!validPin || (state.port ?? 8787) !== port || !['building','prepared','configured','running'].includes(state.phase) ||
           state.deviceUuid !== undefined && !validUuid(state.deviceUuid)) {
         throw new KakaoError('CONFIG_INVALID', 'Existing installation needs review; bootstrap does not update another revision');
       }
       if (fs.existsSync(path.join(data, 'operator-paused'))) throw new KakaoError('POLICY_DENIED', 'Operator pause is active; setup will not resume it');
-      if (state.commit !== commit) {
+      if (!pinned(state)) {
         // Only a clean, empty installation that has never stored credentials can refresh its build.
         // Keep the pending device identity; configured/running installations require a separate update flow.
         const dataStat = present(data) ? fs.lstatSync(data) : undefined;
@@ -116,13 +136,14 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
           throw new KakaoError('CONFIG_INVALID', 'Existing account installation needs review; setup will not update it');
         }
         ownerPath(app, true);
-        if (h.run('git', ['-C', app, 'rev-parse', 'HEAD']).trim() !== state.commit ||
+        if (state.version === 1 && (h.run('git', ['-C', app, 'rev-parse', 'HEAD']).trim() !== state.commit ||
             h.run('git', ['-C', app, 'status', '--porcelain']).trim() ||
-            git('merge-base', state.commit, commit) !== state.commit) {
+            git('merge-base', state.commit, commit) !== state.commit)) {
           throw new KakaoError('CONFIG_INVALID', 'Prepared checkout must be clean and an ancestor of published main');
         }
-        h.log('아직 로그인하지 않은 설치 코드를 최신 origin/main으로 갱신합니다. 기존 기기 키는 유지합니다.');
-        state = { ...state, commit, phase: 'building' }; writePrivate(stateFile, JSON.stringify(state));
+        h.log(pkg ? '아직 로그인하지 않은 설치를 이 패키지 버전으로 갱신합니다. 기존 기기 키는 유지합니다.'
+          : '아직 로그인하지 않은 설치 코드를 최신 origin/main으로 갱신합니다. 기존 기기 키는 유지합니다.');
+        state = pinState('building', state.deviceUuid); writePrivate(stateFile, JSON.stringify(state));
       }
     } else {
       if (present(h.unitFile) || present(path.join(h.repo, '.env.local')) ||
@@ -131,7 +152,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       }
       fs.mkdirSync(h.root, { mode: 0o755 });
       fs.chmodSync(h.root, 0o755); // A restrictive operator umask must not block the service from its home.
-      state = { version: 1, commit, phase: 'building', port }; writePrivate(stateFile, JSON.stringify(state));
+      state = pinState('building'); writePrivate(stateFile, JSON.stringify(state));
     }
     if (state.phase === 'building') {
       if (present(h.unitFile) || present(path.join(app, '.env.local'))) {
@@ -140,32 +161,43 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       if (!h.run('getent', ['passwd', service], true).trim()) {
         h.run('useradd', ['--system', '--user-group', '--no-create-home', '--home-dir', h.root, '--shell', '/usr/sbin/nologin', service]);
       }
-      h.log('origin/main의 고정 커밋을 Git으로 설치하고 의존성과 protocol을 빌드합니다.');
-      if (!fs.existsSync(app)) h.run('git', ['-c', `safe.directory=${h.repo}`, 'clone', '--depth', '1', '--no-local', '--no-checkout', '--', h.repo, app]);
-      const appStat = fs.lstatSync(app), buildUid = Number(h.run('id', ['-u', service]).trim()), buildGid = Number(h.run('id', ['-g', service]).trim());
-      if (!Number.isSafeInteger(buildUid) || buildUid <= 0 || !appStat.isDirectory() || appStat.isSymbolicLink() || (appStat.mode & 0o022) ||
-          !Number.isSafeInteger(buildGid) || buildGid < 0 || appStat.uid !== process.getuid?.() && appStat.uid !== buildUid) {
-        throw new KakaoError('STORAGE_UNSAFE', 'Unsafe installation checkout; no build executed');
+      if (pkg) {
+        h.log(`kakao-max 패키지 ${pin}의 파일을 서비스 영역에 복사합니다. 빌드와 내려받기는 하지 않습니다.`);
+        if (!fs.existsSync(app)) fs.mkdirSync(app, { mode: 0o755 });
+        ownerPath(app, true);
+        installRelease(pkg, app);
+        h.run('chown', ['-R', `root:${service}`, app]);
+        h.run('chmod', ['-R', 'u=rwX,g=rX,o=', app]);
+      } else {
+        h.log('origin/main의 고정 커밋을 Git으로 설치하고 의존성과 protocol을 빌드합니다.');
+        if (!fs.existsSync(app)) h.run('git', ['-c', `safe.directory=${h.repo}`, 'clone', '--depth', '1', '--no-local', '--no-checkout', '--', h.repo, app]);
+        const appStat = fs.lstatSync(app), buildUid = Number(h.run('id', ['-u', service]).trim()), buildGid = Number(h.run('id', ['-g', service]).trim());
+        if (!Number.isSafeInteger(buildUid) || buildUid <= 0 || !appStat.isDirectory() || appStat.isSymbolicLink() || (appStat.mode & 0o022) ||
+            !Number.isSafeInteger(buildGid) || buildGid < 0 || appStat.uid !== process.getuid?.() && appStat.uid !== buildUid) {
+          throw new KakaoError('STORAGE_UNSAFE', 'Unsafe installation checkout; no build executed');
+        }
+        h.run('git', ['-c', `safe.directory=${h.repo}`, '-C', app, 'fetch', '--no-tags', '--depth', '1', h.repo, commit]);
+        h.run('git', ['-C', app, 'checkout', '--detach', commit]);
+        h.run('chown', ['-R', `${service}:${service}`, app]);
+        // The service home is root-owned: npm must not try to create ~/.npm there.
+        const cache = path.join(h.root, 'build-cache'); fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
+        const cacheOwner = fs.lstatSync(cache).uid;
+        if (cacheOwner !== buildUid && cacheOwner !== process.getuid?.()) throw new KakaoError('STORAGE_UNSAFE', 'Unexpected build cache owner');
+        ownerPath(cache, true, cacheOwner); fs.chownSync(cache, buildUid, buildGid); fs.chmodSync(cache, 0o700);
+        h.run('runuser', ['-u', service, '--', h.node, h.npm, '--prefix', app, '--cache', cache, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], false, app);
+        h.run('runuser', ['-u', service, '--', h.node, path.join(app, 'node_modules/typescript/bin/tsc'), '-b', path.join(app, 'packages/protocol')], false, app);
+        h.run('chown', ['-R', `root:${service}`, app]);
+        h.run('chmod', ['-R', 'u=rwX,g=rX,o=', app]);
+        fs.rmSync(cache, { recursive: true, force: true });
       }
-      h.run('git', ['-c', `safe.directory=${h.repo}`, '-C', app, 'fetch', '--no-tags', '--depth', '1', h.repo, commit]);
-      h.run('git', ['-C', app, 'checkout', '--detach', commit]);
-      h.run('chown', ['-R', `${service}:${service}`, app]);
-      // The service home is root-owned: npm must not try to create ~/.npm there.
-      const cache = path.join(h.root, 'build-cache'); fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
-      const cacheOwner = fs.lstatSync(cache).uid;
-      if (cacheOwner !== buildUid && cacheOwner !== process.getuid?.()) throw new KakaoError('STORAGE_UNSAFE', 'Unexpected build cache owner');
-      ownerPath(cache, true, cacheOwner); fs.chownSync(cache, buildUid, buildGid); fs.chmodSync(cache, 0o700);
-      h.run('runuser', ['-u', service, '--', h.node, h.npm, '--prefix', app, '--cache', cache, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], false, app);
-      h.run('runuser', ['-u', service, '--', h.node, path.join(app, 'node_modules/typescript/bin/tsc'), '-b', path.join(app, 'packages/protocol')], false, app);
-      h.run('chown', ['-R', `root:${service}`, app]);
-      h.run('chmod', ['-R', 'u=rwX,g=rX,o=', app]);
-      fs.rmSync(cache, { recursive: true, force: true });
-      state = { ...state, version: 1, commit, phase: 'prepared', port };
+      state = pinState('prepared', state.deviceUuid);
       writePrivate(stateFile, JSON.stringify(state));
     }
     ownerPath(app, true);
-    if (h.run('git', ['-C', app, 'rev-parse', 'HEAD']).trim() !== commit || h.run('git', ['-C', app, 'status', '--porcelain']).trim()) {
-      throw new KakaoError('CONFIG_INVALID', 'Installed Git checkout differs from the pinned revision; no account operation attempted');
+    if (pkg ? releaseDigest(app) !== pkg.digest
+      : h.run('git', ['-C', app, 'rev-parse', 'HEAD']).trim() !== commit || h.run('git', ['-C', app, 'status', '--porcelain']).trim()) {
+      throw new KakaoError('CONFIG_INVALID', pkg ? 'Installed files differ from the pinned release; no account operation attempted'
+        : 'Installed Git checkout differs from the pinned revision; no account operation attempted');
     }
     const serviceUid = Number(h.run('id', ['-u', service]).trim()), serviceGid = Number(h.run('id', ['-g', service]).trim());
     if (!Number.isSafeInteger(serviceUid) || serviceUid <= 0 || !Number.isSafeInteger(serviceGid) || serviceGid < 0) {
@@ -184,7 +216,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       if ((fs.statSync(envFile).mode & 0o077) || fs.statSync(envFile).size > 65536) {
         throw new KakaoError('STORAGE_UNSAFE', 'Existing credentials require review; no registration attempted');
       }
-      state = { version: 1, commit, phase: 'configured', port }; persistState();
+      state = pinState('configured'); persistState();
     }
     if (state.phase === 'prepared') {
       if (await h.occupied()) throw new KakaoError('WORKER_IN_USE', 'MCP endpoint is in use; no registration attempted');
@@ -227,7 +259,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
         KAKAO_MCP_ALLOWED_UIDS: h.operatorUid !== undefined ? String(h.operatorUid) : undefined };
       writePrivate(envFile, Object.entries(config).filter(([,v]) => v !== undefined).map(([k,v]) => `${k}=${v}`).join('\n') + '\n', serviceUid, serviceGid);
       loginData = undefined;
-      state = { version: 1, commit, phase: 'configured', port }; persistState();
+      state = pinState('configured'); persistState();
     }
     ownerPath(envFile, false, serviceUid);
     if ((fs.statSync(envFile).mode & 0o077) || fs.statSync(envFile).size > 65536) throw new KakaoError('STORAGE_UNSAFE', 'Credentials must be private to the service account');
@@ -238,7 +270,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
     }
     if (present(h.unitFile)) {
       ownerPath(h.unitFile);
-      if (fs.readFileSync(h.unitFile, 'utf8') !== serviceUnit(app, data, h.node, service)) {
+      if (fs.readFileSync(h.unitFile, 'utf8') !== serviceUnit(app, data, h.node, service, undefined, layout)) {
         throw new KakaoError('WORKER_IN_USE', 'Existing service definition differs; it was not overwritten');
       }
       if (h.run('systemctl', ['is-active', unit], true).trim() === 'active') {
@@ -248,11 +280,11 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
     }
     if (await h.occupied()) throw new KakaoError('WORKER_IN_USE', 'Another process owns the MCP endpoint; it was not stopped');
     h.log('설치와 계정 설정이 준비되었습니다. 시작하면 데몬 하나가 계정에 연결합니다. 내용 조회·전송 방 허가는 아직 없습니다.');
-    h.log(`시작할 버전: ${commit.slice(0, 12)}\n서비스 계정: ${service}\n코드: ${app}\n계정 데이터: ${data}\nMCP: ${listen}, assistant/rooms. 공개 포트·자동 답장은 켜지 않습니다.`);
+    h.log(`시작할 버전: ${pin}\n서비스 계정: ${service}\n코드: ${app}\n계정 데이터: ${data}\nMCP: ${listen}, assistant/rooms. 공개 포트·자동 답장은 켜지 않습니다.`);
     if (!await confirmSetup(h.prompt, '서비스를 등록하고 시작할까요?', true)) return 'configured';
     ownerPath(path.dirname(h.unitFile), true);
     if (present(h.unitFile)) ownerPath(h.unitFile);
-    writePrivate(h.unitFile, serviceUnit(app, data, h.node, service)); fs.chmodSync(h.unitFile, 0o644);
+    writePrivate(h.unitFile, serviceUnit(app, data, h.node, service, undefined, layout)); fs.chmodSync(h.unitFile, 0o644);
     h.run('systemctl', ['daemon-reload']); h.run('systemctl', ['enable', '--now', unit]);
     let connected = false;
     for (let attempt = 0; attempt < 10; attempt++) {
@@ -260,11 +292,11 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       if (attempt < 9) await h.wait(1000);
     }
     if (!connected) throw new KakaoError('NOT_CONNECTED', 'Service was started but account health is not confirmed. Inspect systemctl/journal; setup will not retry login or restart it.');
-    state = { version: 1, commit, phase: 'running', port }; persistState();
+    state = pinState('running'); persistState();
     const deployLog = path.join(h.root, 'deploys.log');
     if (present(deployLog)) ownerPath(deployLog);
     const logFd = fs.openSync(deployLog, fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
-    try { fs.writeSync(logFd, `${new Date().toISOString()} human ${commit} ${h.reason}\n`); fs.fsyncSync(logFd); }
+    try { fs.writeSync(logFd, `${new Date().toISOString()} human ${pkg ? `${pkg.version} sha256:${pkg.digest}` : commit} ${h.reason}\n`); fs.fsyncSync(logFd); }
     finally { fs.closeSync(logFd); }
     h.log('계정 연결 상태 확인. 다음으로 AI의 MCP 연결 설정을 만드세요.');
     return 'ready';
@@ -273,6 +305,22 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
 
 function validUuid(value: string): boolean {
   return typeof value === 'string' && value.length === 72 && Buffer.from(value, 'base64').length === 52 && Buffer.from(value, 'base64').toString('base64') === value;
+}
+
+/** The running package, refused unless it and every directory above it are root-owned and not group/other-writable. */
+export function protectedRelease(dir: string): Release {
+  const resolved = protectedExecutable(dir);
+  const release = readRelease(resolved);
+  for (const rel of releaseFiles(resolved)) {
+    const stat = fs.lstatSync(path.join(resolved, rel));
+    if (stat.uid !== 0 || (stat.mode & 0o022)) throw new KakaoError('CONFIG_INVALID', 'Install requires a system-wide kakao-max package (sudo npm install -g kakao-max), outside user-writable directories');
+  }
+  const dirs = new Set(releaseFiles(resolved).map(rel => path.dirname(path.join(resolved, rel))));
+  for (const dir of dirs) {
+    const stat = fs.lstatSync(dir);
+    if (stat.uid !== 0 || (stat.mode & 0o022)) throw new KakaoError('CONFIG_INVALID', 'Install requires a system-wide kakao-max package, outside user-writable directories');
+  }
+  return release;
 }
 
 function protectedExecutable(file: string): string {
@@ -286,13 +334,16 @@ function protectedExecutable(file: string): string {
   return resolved;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url, 'setup-system')) {
   const main = async () => {
     if (!(process.argv.length === 4 || process.argv.length === 6 && process.argv[4] === '--port') || process.argv[2] !== '--via-deploy' || process.platform !== 'linux' || process.getuid?.() !== 0 || !process.stdin.isTTY || !process.stderr.isTTY) {
-      throw new KakaoError('APPROVAL_REQUIRED', 'Run the Linux installation wizard from a human terminal with sudo scripts/install.sh bootstrap');
+      throw new KakaoError('APPROVAL_REQUIRED', packagedEntry() ? 'Run the Linux installation wizard from a human terminal with kakao-max setup'
+        : 'Run the Linux installation wizard from a human terminal with sudo scripts/install.sh bootstrap');
     }
     const port = installPort(process.argv[5] ?? '8787');
-    const node = protectedExecutable(process.execPath), npm = protectedExecutable(path.join(path.dirname(node), 'npm'));
+    // A package install copies this program's own release; it must be system-owned like Node itself.
+    const release = packagedEntry() ? protectedRelease(installRoot()) : undefined;
+    const node = protectedExecutable(process.execPath), npm = release ? '' : protectedExecutable(path.join(path.dirname(node), 'npm'));
     const run = (program: string, args: string[], allowFailure = false, cwd?: string) => {
       const command = ['/usr/bin', '/usr/sbin', '/bin', '/sbin'].map(dir => path.join(dir, program)).find(p => fs.existsSync(p));
       if (!command) throw new KakaoError('CONFIG_INVALID', `Install requires ${path.basename(program)}`);
@@ -311,7 +362,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       s.once('connect', () => { s.setTimeout(0); probe(s, 3000).then(r => finish(r.healthy && r.userId === expectedUserId)); });
       s.once('error', () => finish(false)); s.once('timeout', () => finish(false));
     });
-    const outcome = await bootstrapLocal({ repo: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..'), root: '/var/lib/kakao-max',
+    const outcome = await bootstrapLocal({ repo: installRoot(), release, root: '/var/lib/kakao-max',
       unitFile: '/etc/systemd/system/kakao-max.service', node, npm, run, prompt: terminalPrompt, log: s => process.stderr.write(s + '\n'), occupied, healthy,
       reason: process.argv[3], port,
       operatorUid: /^[1-9]\d{0,9}$/.test(process.env.SUDO_UID ?? '') ? Number(process.env.SUDO_UID) : undefined,

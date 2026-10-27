@@ -14,11 +14,10 @@
 // Exit codes: 0 healthy, 1 unhealthy/unreachable. Never prints tokens. Zero deps.
 // ----------------------------------------------------------------------------
 
-import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import { parseListenSpec } from './socket-transport.ts';
 
-import { loadConfig } from '@kakao-max/core';
+import { loadConfig, isMainModule } from '@kakao-max/core';
 
 export interface HealthResult {
   healthy: boolean;
@@ -111,7 +110,7 @@ async function main(): Promise<void> {
   process.exit(1);
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url, 'healthcheck')) {
   main().catch(() => {
     process.stderr.write('[health] fatal: health probe failed\n');
     process.exit(1);

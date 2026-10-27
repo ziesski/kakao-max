@@ -12,7 +12,10 @@ npm run typecheck
 git diff --check
 npm run check:publication
 npm run check:private-terms
+npm run check:package
 ```
+
+배포 패키지 구성과 점검은 [npm 패키지](docs/runbooks/package.md)를 봅니다.
 
 `npm ci`는 Git hook(`.githooks/`)을 설치합니다. 커밋·커밋 메시지·push 때 전화번호·이메일 같은 개인정보와
 관리자가 지정한 비공개 용어를 검사합니다. 커밋 메시지와 PR 설명도 공개되므로 같은 기준을 지킵니다.

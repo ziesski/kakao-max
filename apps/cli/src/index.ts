@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { loadConfig, toKakaoError } from '@kakao-max/core';
+import { spawnSync } from 'node:child_process';
+import { loadConfig, toKakaoError, programArgs } from '@kakao-max/core';
 import { resolveRoom } from './room-resolution.ts';
 import { randomUUID } from 'node:crypto';
 import { sendMessage, sendPhotos, submitWrite, approvalLink } from './agent-send-client.ts';
@@ -539,6 +540,9 @@ ${c.bold}사용 가능한 명령어:${c.reset}
   승인이 필요하면 링크가 출력됩니다. 승인한 뒤 같은 명령에 ${c.cyan}--request-id <id>${c.reset}를 붙여 다시 실행하세요.
   ${c.cyan}kakao status${c.reset}                            현재 LOCO 세션 연결 상태 확인
   ${c.cyan}kakao help${c.reset}                              도움말 보기
+  ${c.cyan}kakao setup${c.reset} [--doctor|--repair|--update]   데몬 설치·연결 마법사
+  ${c.cyan}kakao web${c.reset}                               내 브라우저용 로컬 웹 화면 시작
+  ${c.cyan}kakao approver${c.reset} enroll|list|remove <id>     승인 패스키 관리(데몬 서버 터미널)
 
 ${c.bold}대화방 지정 옵션 (<대화방>):${c.reset}
   • ${c.yellow}#1, #2, #3...${c.reset} 'kakao ls' 번호. 정확한 Chat ID가 번호보다 우선
@@ -555,6 +559,12 @@ ${c.bold}예시:${c.reset}
   $ kakao send self "나에게 보내는 테스트 메모"
   $ kakao send 1 "안녕하세요!"
 `);
+}
+
+/** `kakao setup|web|approver ...`: run that program of this install in the same terminal. */
+function runProgram(name: 'setup' | 'web' | 'approver', args: string[]): number {
+  const result = spawnSync(process.execPath, [...programArgs(name), ...args], { stdio: 'inherit' });
+  return result.status ?? 1;
 }
 
 // ----------------------------------------------------------------------------
@@ -623,6 +633,11 @@ async function main() {
       break;
     case 'status':
       await cmdStatus();
+      break;
+    case 'setup':
+    case 'web':
+    case 'approver':
+      process.exitCode = runProgram(cmd, args);
       break;
     case 'help':
     case '--help':

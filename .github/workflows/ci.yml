@@ -52,3 +52,20 @@ jobs:
           # Bootstrap deliberately refuses unpublished PR commits; still validate their systemd unit.
           if [ "${{ github.event_name }}" = push ]; then args+=(--published-main-fixture); fi
           sudo "$(command -v node)" --experimental-strip-types apps/mcp/src/setup-linux.test.ts "${args[@]}"
+  package:
+    # Pack the npm package, install the tarball offline and run its commands on each OS. Never publishes.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check:package

@@ -9,6 +9,7 @@
 // ----------------------------------------------------------------------------
 
 import fs from 'node:fs';
+import { setupCommand } from './entry.ts';
 import path from 'node:path';
 import { findEnvFile } from './env-file.ts';
 import { loadConfig } from './config.ts';
@@ -92,7 +93,7 @@ export class CredentialStore {
       throw new KakaoError(
         'CONFIG_INVALID',
         'Missing KAKAO_USER_ID / KAKAO_ACCESS_TOKEN / KAKAO_REGISTERED_DEVICE_UUID ' +
-          `(looked in env and ${envPath}). Run npm run setup to register this device.`
+          `(looked in env and ${envPath}). Run ${setupCommand()} to register this device.`
       );
     }
     return new CredentialStore(envPath, { ...credentials, userId, accessToken, deviceUUID });

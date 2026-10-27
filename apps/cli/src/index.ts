@@ -13,6 +13,7 @@ import { runChatShell } from './chat-shell.ts';
 import { runTerminalMessenger } from './terminal-messenger.ts';
 import { messageAttachments, mediaTypeName, parseMediaType } from './attachments.ts';
 import { COMMANDS, parseCommand, type CliContext } from './commands.ts';
+import { renderCommand, renderOverview, suggest, type Paint } from './help.ts';
 
 // ----------------------------------------------------------------------------
 // CLI and terminal messenger share the daemon's MCP policies and connection.
@@ -575,53 +576,25 @@ async function cmdTest(groupOnly = false, chatId?: string) {
   }
 }
 
-function cmdHelp() {
-  console.log(`
-${c.bold}KakaoTalk Native Terminal CLI${c.reset}
-카카오톡을 리눅스/macOS 터미널에서 제어하는 커맨드라인 도구입니다.
+const paint: Paint = { bold: s => c.bold + s + c.reset, cyan: s => c.cyan + s + c.reset, gray: s => c.gray + s + c.reset, yellow: s => c.yellow + s + c.reset };
 
-${c.bold}사용 가능한 명령어:${c.reset}
-  ${c.cyan}kakao chat${c.reset}                             방 검색·방향키·입력창으로 쓰는 터미널 메신저
-  ${c.cyan}kakao shell${c.reset}                            ls/cd/Tab으로 방을 고르고 대화하기
-  ${c.cyan}kakao shell --demo --show-room "공개할 방"${c.reset}  다른 방 이름을 숨기는 촬영 모드
-  ${c.cyan}kakao ls${c.reset} (또는 ${c.cyan}list${c.reset})                       대화방 목록과 안읽은 메시지 확인
-  ${c.cyan}kakao friends [검색어]${c.reset}                  카카오톡 친구 목록 및 연락처 검색
-  ${c.cyan}kakao history <대화방/친구> [개수]${c.reset}     과거 대화 내역 조회 (단축: hist, 첨부는 📎 다운로드 명령 표시)
-  ${c.cyan}kakao search "<검색어>" <대화방>${c.reset}        한 방의 메시지 검색 (대화방 필수)
-  닫힌 방을 읽으면 승인 링크가 출력됩니다. 승인한 뒤 같은 명령에 ${c.cyan}--request-id <id>${c.reset}를 붙여 한 번 읽습니다.
-  ${c.cyan}kakao test${c.reset}                             MCP 핵심 도구 E2E 스모크 테스트 실행
-  ${c.cyan}kakao send <대화방> "<메시지>"${c.reset}          발신 (허용한 방은 바로, 아니면 승인 링크 출력)
-  ${c.cyan}kakao send-photo <대화방> <파일경로>${c.reset}    사진 발신 (승인 방식은 send와 같음)
-  ${c.cyan}kakao send-file <대화방> <파일경로>${c.reset}     파일 발신 (승인 방식은 send와 같음)
-  ${c.cyan}kakao submit <request.json>${c.reset}             요청 파일(mode 0600) 실행: 승인 요청 → 승인 후 같은 파일로 다시 실행
-  ${c.cyan}kakao download <대화방> <token> <저장경로> --message-id <id>${c.reset}  미디어 다운로드 (단축: dl, 옵션: --type photo|video|audio|file, --mini)
-  ${c.cyan}kakao read <대화방>${c.reset}                    읽음 처리 (항상 승인 필요, 데몬의 chats 도구 묶음 필요)
-  승인이 필요하면 링크가 출력됩니다. 승인한 뒤 같은 명령에 ${c.cyan}--request-id <id>${c.reset}를 붙여 다시 실행하세요.
-  ${c.cyan}kakao status${c.reset}                            현재 LOCO 세션 연결 상태 확인
-  ${c.cyan}kakao help${c.reset}                              도움말 보기
-  ${c.cyan}kakao --version${c.reset}                         설치된 kakao-max 버전 보기
-  ${c.cyan}kakao setup${c.reset} [--doctor|--repair|--update]   데몬 설치·연결 마법사
-  ${c.cyan}kakao web${c.reset}                               내 브라우저용 로컬 웹 화면 시작
-  ${c.cyan}kakao approver${c.reset} enroll|list|remove <id>     승인 패스키 관리(데몬 서버 터미널)
+/** Overview of every command, or one command's usage when a name is given. */
+function cmdHelp(topic?: string): boolean {
+  if (!topic) {
+    console.log('\n' + renderOverview(paint) + '\n');
+    return true;
+  }
+  const page = renderCommand(topic, paint);
+  if (page) console.log('\n' + page + '\n');
+  else unknownCommand(topic);
+  return page !== undefined;
+}
 
-${c.bold}데몬 도구 명령어${c.reset} ${c.gray}(결과는 JSON, [묶음]은 KAKAO_MCP_TOOL_GROUPS 필요):${c.reset}
-${Object.values(COMMANDS).map(cmd => `  ${c.cyan}kakao ${cmd.usage}${c.reset}\n      ${cmd.summary}${cmd.group ? ` ${c.gray}[${cmd.group}]${c.reset}` : ''}`).join('\n')}
-
-${c.bold}대화방 지정 옵션 (<대화방>):${c.reset}
-  • ${c.yellow}#1, #2, #3...${c.reset} 'kakao ls' 번호. 정확한 Chat ID가 번호보다 우선
-  • 수동 접근 방 열람은 사람이 승인한 읽기 허가의 --read-grant <id> 필요 (스모크는 승인하지 않음)
-  • ${c.yellow}self / me${c.reset}     나와의 채팅방으로 전송
-  • ${c.yellow}"김철수"${c.reset}       방 이름 또는 상대방 이름의 일부/전체
-  • ${c.yellow}9284102941${c.reset}   카카오톡 고유 Chat ID
-
-${c.bold}예시:${c.reset}
-  $ kakao ls
-  $ kakao history "홍길동" 10
-  $ kakao search "프로토콜" "홍길동"
-  $ kakao test
-  $ kakao send self "나에게 보내는 테스트 메모"
-  $ kakao send 1 "안녕하세요!"
-`);
+function unknownCommand(name: string): void {
+  const near = suggest(name);
+  console.error(`${c.red}알 수 없는 명령어: ${name}${c.reset}`);
+  if (near.length) console.error(`혹시: ${near.map(n => c.cyan + 'kakao ' + n + c.reset).join(', ')}`);
+  console.error(`${c.gray}전체 명령어: kakao help${c.reset}`);
 }
 
 /** `kakao setup|web|approver ...`: run that program of this install in the same terminal. */
@@ -637,6 +610,12 @@ function runProgram(name: 'setup' | 'web' | 'approver', args: string[]): number 
 async function main() {
   const [,, cmd, ...args] = process.argv;
   const option = (name: string) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1]; };
+
+  // `<명령어> --help` shows that command's usage and never runs it (a send stays unsent).
+  if (cmd && !['help', 'commands', '--help', '-h'].includes(cmd) && (args.includes('--help') || args.includes('-h'))) {
+    if (!cmdHelp(cmd)) process.exitCode = 1;
+    return;
+  }
 
   switch (cmd) {
     case 'chat':
@@ -709,9 +688,10 @@ async function main() {
       process.exitCode = runProgram(cmd, args);
       break;
     case 'help':
+    case 'commands':
     case '--help':
     case '-h':
-      cmdHelp();
+      if (!cmdHelp(args[0])) process.exitCode = 1;
       break;
     case 'version':
     case '--version':
@@ -725,8 +705,7 @@ async function main() {
       } else if (Object.hasOwn(COMMANDS, cmd)) {
         await cmdTool(cmd, args);
       } else {
-        console.error(`${c.red}알 수 없는 명령어: ${cmd}${c.reset}`);
-        cmdHelp();
+        unknownCommand(cmd);
         process.exit(1);
       }
   }

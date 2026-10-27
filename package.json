@@ -1,7 +1,35 @@
 {
   "name": "kakao-max",
   "version": "0.1.0",
-  "private": true,
+  "description": "Unofficial headless KakaoTalk account daemon and MCP server for AI agents",
+  "license": "MIT",
+  "author": "ziesski",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ziesski/kakao-max.git"
+  },
+  "homepage": "https://github.com/ziesski/kakao-max#readme",
+  "bugs": {
+    "url": "https://github.com/ziesski/kakao-max/issues"
+  },
+  "keywords": [
+    "kakaotalk",
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "self-hosted"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "kakao-max": "dist/cli.mjs",
+    "kakao-max-mcp": "dist/mcp.mjs",
+    "kakao-max-web": "dist/web.mjs"
+  },
+  "files": [
+    "dist"
+  ],
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -12,12 +40,18 @@
     "pretest": "npm run build --workspace=@kakao-max/protocol",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
+    "build:package": "node scripts/build-package.mjs",
+    "check:package": "node scripts/check-package.mjs",
     "kakao": "node --experimental-strip-types apps/cli/src/index.ts",
     "kakao-max": "node --experimental-strip-types apps/cli/src/index.ts",
     "web": "node --experimental-strip-types apps/web/src/index.ts",
     "presetup": "npm run build --workspace=@kakao-max/protocol",
     "setup": "node --experimental-strip-types apps/mcp/src/setup.ts",
     "typecheck": "npm run build --workspace=@kakao-max/protocol && tsc -p packages/core/tsconfig.json && tsc -p apps/mcp/tsconfig.json && tsc -p apps/cli/tsconfig.json && tsc -p apps/web/tsconfig.json",
-    "prepare": "node -e \"try{require('node:child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\""
+    "prepare": "node -e \"try{require('node:child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\"",
+    "prepack": "npm run build:package"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

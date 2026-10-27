@@ -24,9 +24,8 @@
 // runs under `node --experimental-strip-types` (no TS parameter properties / enums).
 // ----------------------------------------------------------------------------
 
-import { fileURLToPath } from 'node:url';
 import { KakaoDeviceRegistration, type SignRegistrationResult } from '@kakao-max/protocol';
-import { CredentialStore } from '@kakao-max/core';
+import { CredentialStore, isMainModule, setupCommand } from '@kakao-max/core';
 
 /** Default device label shown in the account's 인증 기기 관리 (device management) list. */
 export const DEFAULT_DEVICE_NAME = 'KakaoWeb-MCP';
@@ -74,7 +73,7 @@ async function main(): Promise<void> {
   const { email, password, deviceName, envPath } = CredentialStore.readOptional();
   if (!email || !password) {
     log('Missing KAKAO_EMAIL / KAKAO_PASSWORD. Set them in .env.local (password is sensitive —');
-    log('.env.local only), then re-run. npm run setup does this for a new Linux install.');
+    log(`.env.local only), then re-run. ${setupCommand()} does this for a new Linux install.`);
     process.exit(1);
   }
   const name = deviceName || DEFAULT_DEVICE_NAME;
@@ -105,7 +104,7 @@ async function main(): Promise<void> {
 }
 
 // Run as a CLI unless imported (e.g. by tests).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url, 'register')) {
   main().catch((e) => {
     process.stderr.write('[register] Registration failed; review the account and phone approval before retrying.\n');
     process.exit(1);

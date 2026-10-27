@@ -3,15 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { KakaoError, writeOwnerOnlyJson, isOwnerOnly, writeEnvKeys, readEnvFile, findEnvFile, AGENT_MODES, TRUST_RISK_NOTICE, type AgentMode } from '@kakao-max/core';
+import { KakaoError, writeOwnerOnlyJson, isOwnerOnly, writeEnvKeys, readEnvFile, findEnvFile, AGENT_MODES, TRUST_RISK_NOTICE, type AgentMode, isMainModule, installRoot, packagedEntry, programArgs, setupCommand, type ProgramName } from '@kakao-max/core';
 import { confirmSetup, terminalPrompt, type SetupPrompt } from './setup-prompts.ts';
 import { installPort } from './setup-system.ts';
 import { diagnoseConnection } from './connection-doctor.ts';
 import { parseListenSpec, validateListenSpec } from './socket-transport.ts';
 
 export interface McpConnectionConfig { mcpServers: { 'kakao-max': { command: string; args: string[] } } }
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const ROOT = installRoot();
 
 export function resolveClientConfigFile(homedir = os.homedir()): { file: string; isFallback: boolean } {
   const newPath = path.join(homedir, '.config/kakao-max/mcp.json');
@@ -23,7 +22,7 @@ export function resolveClientConfigFile(homedir = os.homedir()): { file: string;
 }
 
 /** SSH forwards stdio directly to loopback. It never runs a remote shell or starts a daemon. */
-export function connectionConfig(opts: { ssh?: string; listen?: string; repo?: string; node?: string }): McpConnectionConfig {
+export function connectionConfig(opts: { ssh?: string; listen?: string; repo?: string; node?: string; packaged?: boolean }): McpConnectionConfig {
   const listen = opts.listen ?? '127.0.0.1:8787', spec = parseListenSpec(listen);
   if (spec.path && opts.ssh) throw new KakaoError('INVALID_ARGUMENT', 'SSH setup uses the daemon loopback TCP endpoint');
   if (!spec.path) validateListenSpec(spec);
@@ -31,7 +30,7 @@ export function connectionConfig(opts: { ssh?: string; listen?: string; repo?: s
     throw new KakaoError('INVALID_ARGUMENT', 'Use an SSH host alias or user@host, without flags or shell commands');
   }
   return { mcpServers: { 'kakao-max': { command: opts.node ?? process.execPath,
-    args: ['--experimental-strip-types', path.join(opts.repo ?? ROOT, 'apps/mcp/src/connect.ts'), '--resilient', '--listen', listen,
+    args: [...programArgs('connect', { root: opts.repo ?? ROOT, packaged: opts.packaged }), '--resilient', '--listen', listen,
       ...(opts.ssh ? ['--ssh', opts.ssh] : [])] } } };
 }
 
@@ -106,11 +105,16 @@ export async function runSetup(deps: {
     const result = await deps.diagnose({ listen, ssh: ssh || undefined });
     deps.log(result.connected ? '서버 연결 정상. AI에 방 이름과 원하는 작업을 말하면 됩니다. 방별 권한은 필요한 시점에 별도로 요청합니다.' : `설정은 저장했지만 연결 확인이 필요합니다. ${result.nextAction}`);
   }
-  deps.log(`연결 확인: npm run setup -- --doctor --listen ${listen}${ssh ? ' --ssh ' + ssh : ''}. 연결이 안 되면 이 진단부터 실행하세요.`);
+  deps.log(`연결 확인: ${setupCommand(`--doctor --listen ${listen}${ssh ? ' --ssh ' + ssh : ''}`)}. 연결이 안 되면 이 진단부터 실행하세요.`);
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const args = process.argv.slice(2);
+/** Run another program of this install as root through sudo, in the person's terminal. */
+function sudoProgram(name: ProgramName, args: string[]): ReturnType<typeof spawnSync> {
+  return spawnSync('sudo', ['--', process.execPath, ...programArgs(name), ...args], { cwd: ROOT, stdio: 'inherit' });
+}
+
+if (isMainModule(import.meta.url, 'setup')) {
+  const args = process.argv.slice(2), packaged = packagedEntry() !== undefined;
   const main = async () => {
     if (args[0] === '--doctor') {
       const opts: { listen: string; ssh?: string } = { listen: '127.0.0.1:8787' };
@@ -121,8 +125,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       const result = await diagnoseConnection(opts);
       process.stdout.write(JSON.stringify(result, null, 2) + '\n'); process.exitCode = result.connected ? 0 : 1; return;
     }
-    if (args[0] === '--repair' && args.length === 1) {
-      if (process.platform !== 'linux') throw new KakaoError('CONFIG_INVALID', 'Run --repair on the Linux server; --doctor also works from your AI computer.');
+    if ((args[0] === '--repair' || args[0] === '--update') && args.length === 1) {
+      if (process.platform !== 'linux') throw new KakaoError('CONFIG_INVALID', `Run ${args[0]} on the Linux server; --doctor also works from your AI computer.`);
+      if (packaged) {
+        // The package's own release is what gets installed: upgrade the package first, then run --update.
+        const result = sudoProgram('update-managed', ['--via-deploy', 'release', args[0] === '--update' ? 'package update' : 'interactive managed authentication repair', ...(args[0] === '--repair' ? ['--repair'] : [])]);
+        if (result.status !== 0) throw new KakaoError(args[0] === '--repair' ? 'AUTH_EXPIRED' : 'CONFIG_INVALID', `${args[0] === '--repair' ? 'Repair' : 'Update'} stopped. Follow the terminal message; no automatic takeover or registration.`);
+        return;
+      }
+      if (args[0] === '--update') throw new KakaoError('INVALID_ARGUMENT', 'A source checkout is updated by its operator deploy flow; --update is for package installs.');
       const fetched = spawnSync('git', ['fetch', '--no-tags', 'origin', 'main'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
       if (fetched.status !== 0) throw new KakaoError('CONFIG_INVALID', 'Update Git access first; no login was attempted.');
       const repair = spawnSync('sudo', ['--', path.join(ROOT, 'scripts/install.sh'), 'repair'], { cwd: ROOT, stdio: 'inherit' });
@@ -148,11 +159,17 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       }
       process.stdout.write(JSON.stringify(connectionConfig(opts), null, 2) + '\n'); return;
     }
-    if (args.length) throw new KakaoError('INVALID_ARGUMENT', 'Usage: setup.ts [--config [--ssh user@host] [--listen loopback:port]] | --mode ask|trust [--accept-risk] [--env path]');
+    if (args.length) throw new KakaoError('INVALID_ARGUMENT', `Usage: ${setupCommand('[--config [--ssh user@host] [--listen loopback:port]] | --doctor | --repair | --update | --mode ask|trust [--accept-risk] [--env path]')}`);
     const clientConfig = resolveClientConfigFile();
     await runSetup({ prompt: terminalPrompt, log: s => process.stderr.write(s + '\n'), output: s => process.stdout.write(s + '\n'),
       diagnose: diagnoseConnection, repo: ROOT, platform: process.platform, configFile: clientConfig.file,
       install: port => {
+        if (packaged) {
+          const result = sudoProgram('setup-system', ['--via-deploy', 'self-hosted MCP first install', '--port', String(port ?? 8787)]);
+          if (result.status === 3 || result.status === 4) return false; // Settings-only or intentional cancellation.
+          if (result.error || result.status !== 0) throw new KakaoError('CONFIG_INVALID', 'Installation did not complete; review the installer message. No automatic retry.');
+          return true;
+        }
         // Fetch as the invoking user, before sudo, so root does not take ownership of their .git files.
         const fetched = spawnSync('git', ['fetch', '--no-tags', 'origin', 'main'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] });
         if (fetched.error || fetched.status !== 0) throw new KakaoError('CONFIG_INVALID', 'Could not refresh origin/main. Update Git access before installing; no login attempted.');

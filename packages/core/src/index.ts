@@ -12,6 +12,7 @@ export { longReplacer } from './long-json.ts';
 
 export { KakaoError, toKakaoError } from './errors.ts';
 export { isOwnerOnly, fsyncDir } from './private-fs.ts';
+export { isMainModule, packagedEntry, installRoot, programArgs, setupCommand, PROGRAM_SOURCES, type ProgramName } from './entry.ts';
 
 export { loadConfig, approvalWindowFromConfig, removedSettingsIn, parseAllowedUids, MCP_TOOL_GROUPS, type McpToolGroup, type KakaoConfig } from './config.ts';
 export { AGENT_MODES, TRUST_APPROVED_ACTIONS, TRUST_RISK_NOTICE, agentModeApproves, type AgentMode } from './agent-mode.ts';

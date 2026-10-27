@@ -1,6 +1,6 @@
 // Operator terminal on the daemon host: create a one-time passkey enrollment code, list or remove
 // approvers. Requires an interactive terminal; there is deliberately no MCP equivalent.
-import { ApproverRegistry, KakaoError, loadConfig } from '@kakao-max/core';
+import { ApproverRegistry, KakaoError, loadConfig, packagedEntry } from '@kakao-max/core';
 import { createEnrollment } from './enrollment.ts';
 
 function main(): void {
@@ -18,7 +18,7 @@ function main(): void {
   } else if (command === 'remove' && arg) {
     process.stdout.write(registry.remove(arg) ? '삭제했습니다. 이 패스키의 기존 승인도 더는 쓸 수 없습니다.\n' : '해당 ID가 없습니다.\n');
   } else {
-    process.stdout.write('사용법: npm run approver --workspace=@kakao-max/mcp -- enroll | list | remove <id>\n');
+    process.stdout.write(`사용법: ${packagedEntry() ? 'kakao-max approver' : 'npm run approver --workspace=@kakao-max/mcp --'} enroll | list | remove <id>\n`);
     process.exitCode = 1;
   }
 }

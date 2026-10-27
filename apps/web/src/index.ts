@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { McpBridge, type McpToolError } from './mcp-bridge.ts';
 import { ApprovalRelay } from './approval-relay.ts';
 import { fetchOg, type OgPreview } from './og.ts';
+// Only the program-location helper: the GUI never loads the account core.
+import { packagedEntry } from '../../../packages/core/src/entry.ts';
 import { localRequestProblem, createLaunchSecret, hasSession, matchesSecret, sessionCookie } from './http-security.ts';
 
 // ----------------------------------------------------------------------------
@@ -17,7 +19,8 @@ import { localRequestProblem, createLaunchSecret, hasSession, matchesSecret, ses
 // ----------------------------------------------------------------------------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WEB_DIR = path.resolve(__dirname, '../public');
+// The package ships the page beside its bundle (dist/web-public); a checkout serves apps/web/public.
+const WEB_DIR = path.resolve(__dirname, packagedEntry() ? 'web-public' : '../public');
 const PORT = Number(process.env.PORT || 8899);
 // Shown only on the person's terminal; see http-security.ts.
 const LAUNCH_SECRET = createLaunchSecret();
@@ -315,14 +318,14 @@ const server = http.createServer(async (req, res) => {
   const problem = localRequestProblem(req, port);
   if (problem) return sendJson(res, 403, { error: `Refused: only this GUI's own page may use the API (${problem})` });
   if (p === '/launch' && req.method === 'GET') {
-    if (!matchesSecret(url.searchParams.get('t'), LAUNCH_SECRET)) return sendJson(res, 403, { error: 'Invalid launch link; use the one printed by npm run web' });
+    if (!matchesSecret(url.searchParams.get('t'), LAUNCH_SECRET)) return sendJson(res, 403, { error: 'Invalid launch link; use the one printed in the terminal that started the GUI' });
     res.writeHead(303, { 'Set-Cookie': sessionCookie(port, LAUNCH_SECRET), Location: '/', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
     return res.end();
   }
   if (!hasSession(req.headers, port, LAUNCH_SECRET)) {
-    if (p.startsWith('/api/')) return sendJson(res, 401, { error: 'Open the launch link printed by npm run web' });
+    if (p.startsWith('/api/')) return sendJson(res, 401, { error: 'Open the launch link printed in the terminal that started the GUI' });
     res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end('kakao-max web: open the launch link printed in the terminal where you ran npm run web.\n');
+    return res.end('kakao-max web: open the launch link printed in the terminal that started the GUI.\n');
   }
   try {
     if (p === '/api/approvals' && req.method === 'GET') {

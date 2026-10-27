@@ -2,9 +2,8 @@
 // Opaque MCP bridge to the existing daemon. Never imports KakaoSession or loads credentials.
 import net from 'node:net';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import type { Readable, Writable } from 'node:stream';
-import { KakaoError } from '@kakao-max/core';
+import { KakaoError, isMainModule, setupCommand } from '@kakao-max/core';
 import { reconnectingBridge } from './reconnecting-bridge.ts';
 import { openDaemon, validateConnection, type ConnectionOptions } from './daemon-connection.ts';
 import { parseListenSpec, validateListenSpec } from './socket-transport.ts';
@@ -64,12 +63,12 @@ export function resilientConnectorArgs(args: string[]): ConnectionOptions {
   validateConnection(options); return options;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url, 'connect')) {
   Promise.resolve().then(() => {
     const args = process.argv.slice(2);
     if (!args.includes('--resilient')) return bridgeMcp(process.stdin, process.stdout, connectorArgs(args));
     const options = resilientConnectorArgs(args);
     return reconnectingBridge(process.stdin, process.stdout, () => openDaemon(options));
   })
-    .catch(() => { process.stderr.write('[connect] Existing MCP daemon unavailable or unsafe endpoint. No login or replay was attempted. Run npm run setup -- --doctor with the same connection settings.\n'); process.exitCode = 1; });
+    .catch(() => { process.stderr.write(`[connect] Existing MCP daemon unavailable or unsafe endpoint. No login or replay was attempted. Run ${setupCommand('--doctor')} with the same connection settings.\n`); process.exitCode = 1; });
 }

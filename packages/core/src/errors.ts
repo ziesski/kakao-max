@@ -8,6 +8,7 @@
 // ----------------------------------------------------------------------------
 
 import { isLocoError } from '@kakao-max/protocol';
+import { setupCommand } from './entry.ts';
 
 export type KakaoErrorCode =
   | 'SESSION_DENIED' // browser session, ownership or CSRF verification failed
@@ -60,10 +61,10 @@ export class KakaoError extends Error {
 /** Safe next steps, without relaxing room or account policy. */
 export function recoveryAdvice(code: KakaoErrorCode): { action: string; message: string } | undefined {
   switch (code) {
-    case 'AUTH_EXPIRED': return { action: 'repair_saved_login', message: 'On the managed server run npm run setup -- --repair. Keep the registered device; never automatically force login or re-register.' };
+    case 'AUTH_EXPIRED': return { action: 'repair_saved_login', message: `On the managed server run ${setupCommand('--repair')}. Keep the registered device; never automatically force login or re-register.` };
     case 'PC_SESSION_CONFLICT': return { action: 'ask_account_owner', message: 'Another PC may own the account. Keep its connection and ask the person; do not retry with forced login.' };
     case 'NOT_CONNECTED':
-    case 'NETWORK': return { action: 'diagnose_connection', message: 'The connector reconnects automatically. If unavailable, run npm run setup -- --doctor with the same --listen/--ssh settings. Never replay an uncertain mutation.' };
+    case 'NETWORK': return { action: 'diagnose_connection', message: `The connector reconnects automatically. If unavailable, run ${setupCommand('--doctor')} with the same --listen/--ssh settings. Never replay an uncertain mutation.` };
     case 'ROOM_NOT_READ': return { action: 'inspect_room_read_state', message: 'Refresh get_room_access metadata. Message access and marking read require separate permissions; never mark read automatically.' };
     case 'POLICY_DENIED': return { action: 'review_scope_with_person', message: 'Inspect the policy and room access. Request only the scope the person asked for through the client approval flow.' };
     case 'SEND_OUTCOME_UNKNOWN':

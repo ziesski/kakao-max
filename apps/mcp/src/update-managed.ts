@@ -3,13 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { KakaoError, parseAllowedUids, removedSettingsIn } from '@kakao-max/core';
+import { KakaoError, parseAllowedUids, removedSettingsIn, isMainModule, installRoot, packagedEntry } from '@kakao-max/core';
 import { parseEnv } from '../../../packages/core/src/env-file.ts';
 import { configureManagedLogin, readManagedEnv } from './managed-login.ts';
 import { terminalPrompt } from './setup-prompts.ts';
-import { serviceUnit, legacyServiceUnit, installPort } from './setup-system.ts';
+import { serviceUnit, legacyServiceUnit, installPort, protectedRelease } from './setup-system.ts';
+import { installRelease, releaseDigest, releaseLabel, RELEASE_DIGEST, RELEASE_VERSION, type Release } from './release.ts';
 import { probe } from './healthcheck.ts';
 
 const DEFAULT_SERVICE = 'kakao-max';
@@ -22,6 +22,8 @@ const MOVED_KEYS = ['KAKAO_DATA_DIR', 'KAKAO_AUDIT_LOG'];
 export interface UpdateHost {
   repo: string; root: string; unitFile: string; node: string; npm: string; target: string; reason: string;
   recover?: boolean;
+  /** Update a package install to this release; `target` is then the literal `release`. */
+  release?: Release;
   service?: string;
   legacyRoot?: string;
   legacyUnitFile?: string;
@@ -44,7 +46,8 @@ function manifest(file: string, state: unknown): void {
   const dir = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
 }
 export async function updateManaged(h: UpdateHost): Promise<void> {
-  if (!/^[a-f0-9]{40}$/.test(h.target) || !h.reason.trim() || h.reason.length > 256 || /[\x00-\x1f\x7f]/.test(h.reason)) throw new KakaoError('CONFIG_INVALID', 'Invalid managed update request');
+  const pkg = h.release, layout = pkg ? 'package' : 'source';
+  if (!(pkg ? h.target === 'release' && RELEASE_VERSION.test(pkg.version) && RELEASE_DIGEST.test(pkg.digest) : /^[a-f0-9]{40}$/.test(h.target)) || !h.reason.trim() || h.reason.length > 256 || /[\x00-\x1f\x7f]/.test(h.reason)) throw new KakaoError('CONFIG_INVALID', 'Invalid managed update request');
   const service = h.service ?? DEFAULT_SERVICE;
   // Only the CLI names the host's legacy install; an injected host without legacy paths never migrates.
   const legacyRoot = h.legacyRoot ?? '';
@@ -61,6 +64,7 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
   }
 
   const isMigration = legacyRootExists && !targetRootExists;
+  if (isMigration && pkg) throw new KakaoError('CONFIG_INVALID', `The ${legacyService} installation came from a source checkout; migrate it from that checkout. Nothing was stopped`);
   const activeRoot = isMigration ? legacyRoot : h.root;
   const activeUnit = isMigration ? legacyUnit : h.unitFile;
   const activeService = isMigration ? legacyService : service;
@@ -88,7 +92,12 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
     if ((fs.statSync(stateFile).mode & 0o077) || fs.statSync(stateFile).size > 4096) throw new KakaoError('STORAGE_UNSAFE', 'Unsafe install manifest');
     const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     const port = installPort(String(state.port));
-    if (state.version !== 1 || (state.phase !== 'running' && !(h.recover && state.phase === 'configured')) || !/^[a-f0-9]{40}$/.test(state.commit) || state.deviceUuid !== undefined) throw new KakaoError('CONFIG_INVALID', 'Managed update requires running state, or explicit recovery of a configured installation');
+    if (pkg ? state.version === 1 : state.version === 2) {
+      throw new KakaoError('CONFIG_INVALID', pkg ? 'This installation was set up from a source checkout; update it from that checkout. Nothing was stopped'
+        : 'This installation was set up from the kakao-max package; update it with kakao-max setup --update. Nothing was stopped');
+    }
+    const validPin = pkg ? RELEASE_VERSION.test(state.release) && RELEASE_DIGEST.test(state.digest) : /^[a-f0-9]{40}$/.test(state.commit);
+    if (![1, 2].includes(state.version) || (state.phase !== 'running' && !(h.recover && state.phase === 'configured')) || !validPin || state.deviceUuid !== undefined) throw new KakaoError('CONFIG_INVALID', 'Managed update requires running state, or explicit recovery of a configured installation');
     const uid = Number(h.run('id', ['-u', activeService]).trim()), gid = Number(h.run('id', ['-g', activeService]).trim());
     if (!Number.isSafeInteger(uid) || uid <= 0 || !Number.isSafeInteger(gid) || gid < 0) throw new KakaoError('CONFIG_INVALID', 'Invalid service identity');
     protectedPath(env, false, uid); protectedPath(data, true, uid);
@@ -103,7 +112,7 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
 
     const expectedUnit = isMigration
       ? legacyServiceUnit(app, data, h.node, activeService)
-      : serviceUnit(app, data, h.node, activeService);
+      : serviceUnit(app, data, h.node, activeService, undefined, layout);
     if (saved.KAKAO_DATA_DIR !== data || saved.KAKAO_MCP_LISTEN !== `127.0.0.1:${port}` || !/^[1-9]\d{0,18}$/.test(saved.KAKAO_USER_ID ?? '') ||
         fs.readFileSync(activeUnit, 'utf8') !== expectedUnit) throw new KakaoError('CONFIG_INVALID', 'Managed settings differ; nothing was restarted');
 
@@ -126,10 +135,13 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
     const stripMovedPaths = (txt: string) => txt.split('\n').filter(l => !MOVED_KEYS.some(k => l.startsWith(`${k}=`))).join('\n');
 
     const git = (repo: string, ...args: string[]) => h.run('git', ['--no-optional-locks', '-c', `safe.directory=${h.repo}`, '-C', repo, ...args]).trim();
-    if (git(h.repo, 'rev-parse', 'HEAD') !== h.target || git(h.repo, 'rev-parse', 'origin/main') !== h.target || git(h.repo, 'status', '--porcelain') ||
+    if (pkg) {
+      if (releaseDigest(app) !== state.digest) throw new KakaoError('CONFIG_INVALID', 'Installed files differ from the recorded release; nothing was stopped');
+    } else if (git(h.repo, 'rev-parse', 'HEAD') !== h.target || git(h.repo, 'rev-parse', 'origin/main') !== h.target || git(h.repo, 'status', '--porcelain') ||
         git(app, 'rev-parse', 'HEAD') !== state.commit || git(app, 'status', '--porcelain') || git(h.repo, 'merge-base', state.commit, h.target) !== state.commit) {
       throw new KakaoError('CONFIG_INVALID', 'Update requires clean published main and its managed ancestor');
     }
+    const current = pkg ? state.release === pkg.version && state.digest === pkg.digest : state.commit === h.target;
     const active = h.run('systemctl', ['is-active', `${activeService}.service`], true).trim();
     if (h.recover) {
       if (!['configured', 'running'].includes(state.phase) || !['inactive', 'failed'].includes(active) ||
@@ -150,14 +162,14 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
       }
     } else {
       if (active !== 'active' || !await h.healthy(saved.KAKAO_USER_ID, port)) throw new KakaoError('NOT_CONNECTED', 'Existing account health is unconfirmed; nothing was restarted');
-      if (!isMigration && state.commit === h.target) return;
+      if (!isMigration && current) return;
     }
 
     const beforeEnvText = fs.readFileSync(env, 'utf8');
     const beforeEnvWithoutMoved = stripMovedPaths(beforeEnvText);
     const beforeDigest = digest();
 
-    git(app, 'fetch', '--no-tags', '--depth', '1', h.repo, h.target);
+    if (!pkg) git(app, 'fetch', '--no-tags', '--depth', '1', h.repo, h.target);
     h.run('systemctl', ['stop', `${activeService}.service`]);
     const stopped = h.run('systemctl', ['is-active', `${activeService}.service`], true).trim();
     if (stopped !== 'inactive' && !(h.recover && stopped === 'failed') ||
@@ -238,12 +250,15 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
       }
 
       currentStep = `build app in ${path.join(finalRoot, 'app')}`;
-      git(app, 'checkout', '--detach', h.target);
-      h.run('chown', ['-R', `${finalService}:${finalService}`, app]);
-      const cache = path.join(finalRoot, 'build-cache'); fs.mkdirSync(cache, { mode: 0o700 }); fs.chownSync(cache, uid, gid);
-      h.run('runuser', ['-u', finalService, '--', h.node, h.npm, '--cache', cache, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], false, app);
-      h.run('runuser', ['-u', finalService, '--', h.node, path.join(app, 'node_modules/typescript/bin/tsc'), '-b', path.join(app, 'packages/protocol')], false, app);
-      fs.rmSync(cache, { recursive: true });
+      if (pkg) installRelease(pkg, app);
+      else {
+        git(app, 'checkout', '--detach', h.target);
+        h.run('chown', ['-R', `${finalService}:${finalService}`, app]);
+        const cache = path.join(finalRoot, 'build-cache'); fs.mkdirSync(cache, { mode: 0o700 }); fs.chownSync(cache, uid, gid);
+        h.run('runuser', ['-u', finalService, '--', h.node, h.npm, '--cache', cache, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], false, app);
+        h.run('runuser', ['-u', finalService, '--', h.node, path.join(app, 'node_modules/typescript/bin/tsc'), '-b', path.join(app, 'packages/protocol')], false, app);
+        fs.rmSync(cache, { recursive: true });
+      }
       completedSteps.push(currentStep);
     } catch (err) {
       if (isMigration) {
@@ -297,19 +312,20 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
       if (digest() !== beforeDigest) throw new KakaoError('STORAGE_UNSAFE', 'Credential integrity changed; service remains stopped');
     }
 
-    if (git(app, 'rev-parse', 'HEAD') !== h.target || git(app, 'status', '--porcelain')) throw new KakaoError('STORAGE_UNSAFE', 'Build integrity changed; service remains stopped');
-    manifest(stateFile, { ...state, commit: h.target, phase: 'configured' });
+    if (pkg ? releaseDigest(app) !== pkg.digest : git(app, 'rev-parse', 'HEAD') !== h.target || git(app, 'status', '--porcelain')) throw new KakaoError('STORAGE_UNSAFE', 'Build integrity changed; service remains stopped');
+    const pinned = pkg ? { release: pkg.version, digest: pkg.digest } : { commit: h.target };
+    manifest(stateFile, { ...state, ...pinned, phase: 'configured' });
     if (h.recover) h.run('systemctl', ['reset-failed', `${finalService}.service`]);
     h.run('systemctl', ['start', `${finalService}.service`]);
     let healthy = false;
     for (let i = 0; i < (saved.KAKAO_ENABLE_TOKEN_REFRESH === '1' ? 180 : 10); i++) { if (await h.healthy(saved.KAKAO_USER_ID, port)) { healthy = true; break; } await h.wait(); }
     if (!healthy) throw new KakaoError('NOT_CONNECTED', 'Updated account health is unconfirmed; no login or restart retry attempted');
-    manifest(stateFile, { ...state, commit: h.target, phase: 'running' });
+    manifest(stateFile, { ...state, ...pinned, phase: 'running' });
     const log = path.join(finalRoot, 'deploys.log'); if (fs.existsSync(log)) protectedPath(log, false);
     const logFd = fs.openSync(log, fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
     try {
       const reasonSuffix = isMigration ? ` (migrated from ${legacyService})` : '';
-      fs.writeSync(logFd, `${new Date().toISOString()} human ${h.target} ${h.reason}${reasonSuffix}\n`);
+      fs.writeSync(logFd, `${new Date().toISOString()} human ${pkg ? `${pkg.version} sha256:${pkg.digest}` : h.target} ${h.reason}${reasonSuffix}\n`);
       fs.fsyncSync(logFd);
     } finally {
       fs.closeSync(logFd);
@@ -324,11 +340,15 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isMainModule(import.meta.url, 'update-managed')) {
   const main = async () => {
-    if (process.platform !== 'linux' || process.getuid?.() !== 0 || ![5, 6].includes(process.argv.length) || process.argv[2] !== '--via-deploy' || (process.argv.length === 6 && !['--recover', '--repair'].includes(process.argv[5]))) throw new KakaoError('POLICY_DENIED', 'Use sudo scripts/install.sh repair (or the operator deploy script for updates)');
-    const node = fs.realpathSync('/usr/bin/node'), npm = fs.realpathSync('/usr/bin/npm'); protectedPath(node, false, 0); protectedPath(npm, false, 0);
-    await updateManaged({ repo: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..'), root: '/var/lib/kakao-max', unitFile: '/etc/systemd/system/kakao-max.service', legacyRoot: LEGACY_ROOT, legacyUnitFile: LEGACY_UNIT, node, npm, target: process.argv[3], reason: process.argv[4], recover: ['--recover', '--repair'].includes(process.argv[5]),
+    if (process.platform !== 'linux' || process.getuid?.() !== 0 || ![5, 6].includes(process.argv.length) || process.argv[2] !== '--via-deploy' || (process.argv.length === 6 && !['--recover', '--repair'].includes(process.argv[5]))) {
+      throw new KakaoError('POLICY_DENIED', packagedEntry() ? 'Use kakao-max setup --update or --repair' : 'Use sudo scripts/install.sh repair (or the operator deploy script for updates)');
+    }
+    const release = packagedEntry() ? protectedRelease(installRoot()) : undefined;
+    const node = fs.realpathSync('/usr/bin/node'); protectedPath(node, false, 0);
+    const npm = release ? '' : fs.realpathSync('/usr/bin/npm'); if (npm) protectedPath(npm, false, 0);
+    await updateManaged({ repo: installRoot(), release, root: '/var/lib/kakao-max', unitFile: '/etc/systemd/system/kakao-max.service', legacyRoot: LEGACY_ROOT, legacyUnitFile: LEGACY_UNIT, node, npm, target: process.argv[3], reason: process.argv[4], recover: ['--recover', '--repair'].includes(process.argv[5]),
       configureLogin: process.argv[5] === '--repair' ? (file, data, uid) => configureManagedLogin(file, data, uid, terminalPrompt) : undefined,
       run: (program, args, allowFailure, cwd) => {
         const command = ['/usr/bin', '/usr/sbin', '/bin', '/sbin'].map(dir => path.join(dir, program)).find(p => fs.existsSync(p));
@@ -342,7 +362,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
         socket.once('connect', () => { socket.setTimeout(0); probe(socket, 3000).then(r => finish(r.healthy && r.userId === expected)); });
         socket.once('error', () => finish(false)); socket.once('timeout', () => finish(false));
       }), wait: () => new Promise(resolve => setTimeout(resolve, 1000)) });
-    process.stderr.write('[update] Managed daemon connected; credentials preserved; no registration performed\n');
+    process.stderr.write(`[update] Managed daemon connected${release ? ` on ${releaseLabel(release.version, release.digest)}` : ''}; credentials preserved; no registration performed\n`);
   };
   main().catch(e => { process.stderr.write(`[update] ${e instanceof KakaoError ? e.message : 'Update stopped; review managed state'}\n`); process.exitCode = 1; });
 }

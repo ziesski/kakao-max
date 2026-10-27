@@ -1,0 +1,14 @@
+{
+  "name": "@kakao-max/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@kakao-max/core": "*",
+    "@kakao-max/mcp": "*"
+  }
+}

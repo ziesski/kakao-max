@@ -1,0 +1,3 @@
+#!/bin/sh
+# Block private terms in staged changes (scripts/check-private-terms.mjs). Never bypass with --no-verify.
+exec node scripts/check-private-terms.mjs --staged

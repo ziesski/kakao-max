@@ -1,0 +1,23 @@
+{
+  "name": "kakao-max",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "check:publication": "node scripts/check-publication.mjs",
+    "check:private-terms": "node scripts/check-private-terms.mjs --tree HEAD",
+    "pretest": "npm run build --workspace=@kakao-max/protocol",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "kakao": "node --experimental-strip-types apps/cli/src/index.ts",
+    "kakao-max": "node --experimental-strip-types apps/cli/src/index.ts",
+    "web": "node --experimental-strip-types apps/web/src/index.ts",
+    "presetup": "npm run build --workspace=@kakao-max/protocol",
+    "setup": "node --experimental-strip-types apps/mcp/src/setup.ts",
+    "typecheck": "npm run build --workspace=@kakao-max/protocol && tsc -p packages/core/tsconfig.json && tsc -p apps/mcp/tsconfig.json && tsc -p apps/cli/tsconfig.json && tsc -p apps/web/tsconfig.json",
+    "prepare": "node -e \"try{require('node:child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\""
+  }
+}

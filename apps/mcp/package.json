@@ -1,0 +1,21 @@
+{
+  "name": "@kakao-max/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "kakao-max-mcp": "src/index.ts"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "register": "node --experimental-strip-types src/register.ts",
+    "health": "node --experimental-strip-types src/healthcheck.ts",
+    "approver": "node --experimental-strip-types src/approver.ts",
+    "build": "echo \"[mcp] ready\"",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@kakao-max/core": "*",
+    "@kakao-max/protocol": "*"
+  }
+}

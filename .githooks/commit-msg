@@ -1,0 +1,3 @@
+#!/bin/sh
+# Commit messages are public forever, even on branches that get squash-merged.
+exec node scripts/check-private-terms.mjs --message-file "$1"

@@ -1,0 +1,2 @@
+# Keep LF on every platform: shell scripts and source regexes assume it (Git for Windows defaults to CRLF checkouts).
+* text=auto eol=lf

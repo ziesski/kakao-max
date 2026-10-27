@@ -1,0 +1,46 @@
+name: private-terms
+
+# pull_request_target gives fork PRs the maintainer deny list. That is safe only because this job
+# runs the base branch's scanner on the PR's commits as data: it never checks out or runs PR code.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  private-terms:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || github.event.pull_request.base.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch the pull request's commits as data
+        if: github.event_name == 'pull_request_target'
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+      - name: Scan the pull request's commits, title and description
+        if: github.event_name == 'pull_request_target'
+        env:
+          KAKAO_MAX_DENYLIST: ${{ secrets.KAKAO_MAX_DENYLIST }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/check-private-terms.mjs --require-private --text-env PR_TITLE --text-env PR_BODY --commits "$HEAD" --not "$BASE"
+      - name: Scan pushed commits and the whole tree
+        if: github.event_name == 'push'
+        env:
+          KAKAO_MAX_DENYLIST: ${{ secrets.KAKAO_MAX_DENYLIST }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          node scripts/check-private-terms.mjs --require-private --tree HEAD
+          node scripts/check-private-terms.mjs --require-private --commits HEAD --not "$BEFORE"

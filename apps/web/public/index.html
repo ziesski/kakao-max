@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KakaoTalk Web</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 1. Left Navigation Rail (PC style 56px) -->
+    <nav class="nav-rail" id="navRail" aria-label="메인 메뉴">
+      <div class="nav-top">
+        <div class="nav-logo" title="KakaoTalk Web">
+          <svg viewBox="0 0 32 32" width="28" height="28">
+            <path fill="#fee500" d="M16 4C9.37 4 4 8.57 4 14.2c0 3.52 2.11 6.63 5.4 8.5l-1.37 5.01a0.6 0.6 0 0 0 .75.73l5.97-2.59c.4.04.81.07 1.25.07 6.63 0 12-4.57 12-10.2S22.63 4 16 4z"/>
+            <path fill="#3c1e1e" d="M16 11.2c-.66 0-1.2.54-1.2 1.2v3.6c0 .66.54 1.2 1.2 1.2s1.2-.54 1.2-1.2v-3.6c0-.66-.54-1.2-1.2-1.2zm-3.6 1.2c-.66 0-1.2.54-1.2 1.2v1.2c0 .66.54 1.2 1.2 1.2s1.2-.54 1.2-1.2v-1.2c0-.66-.54-1.2-1.2-1.2zm7.2 0c-.66 0-1.2.54-1.2 1.2v1.2c0 .66.54 1.2 1.2 1.2s1.2-.54 1.2-1.2v-1.2c0-.66-.54-1.2-1.2-1.2z"/>
+          </svg>
+        </div>
+        <button class="nav-item" data-tab="friends" id="tabFriends" title="친구 목록 (Alt+1)">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+          <span class="nav-label">친구</span>
+        </button>
+        <button class="nav-item active" data-tab="chats" id="tabChats" title="대화방 목록 (Alt+2)">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/></svg>
+          <span class="nav-label">채팅</span>
+          <span class="nav-badge hidden" id="totalUnreadBadge">0</span>
+        </button>
+        <button class="nav-item" data-tab="settings" id="tabSettings" title="환경설정 (Alt+3)">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+          <span class="nav-label">설정</span>
+        </button>
+      </div>
+
+      <div class="nav-bottom">
+        <button class="nav-icon-btn" id="soundToggle" title="알림음 켜기/끄기" aria-label="알림음 토글">
+          <svg id="soundOnIcon" viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+          <svg id="soundOffIcon" class="hidden" viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+        </button>
+        <button class="nav-icon-btn" id="lockModeBtn" title="잠금 모드 전환 (Ctrl+L)" aria-label="잠금 모드">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+        </button>
+        <button class="nav-icon-btn" id="themeToggle" title="다크/라이트 모드 전환" aria-label="테마 전환">🌓</button>
+        <div class="conn-dot" id="conn" title="연결 상태">●</div>
+      </div>
+    </nav>
+
+    <!-- 2. Sidebar View: Friends or Chats or Settings -->
+    <aside class="sidebar">
+      <!-- 2A. Friends Panel -->
+      <section class="side-panel hidden" id="friendsPanel">
+        <header class="panel-head">
+          <h2 class="panel-title">친구</h2>
+          <div class="panel-actions">
+            <button class="icon-btn" id="addFriendBtn" title="친구 추가">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <!-- Search Friends -->
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+          <input type="text" id="friendSearchInput" placeholder="이름 검색" autocomplete="off" />
+          <button id="clearFriendSearch" class="clear-search" aria-label="검색어 지우기">✕</button>
+        </div>
+
+        <div class="scroll-panel" id="friendsScroll">
+          <!-- My Profile Card -->
+          <div class="section-label">내 프로필</div>
+          <div class="profile-card me-card" id="myProfileCard">
+            <div class="avatar-wrap" id="myAvatarWrap">
+              <span class="avatar my-avatar" id="myAvatar">나</span>
+            </div>
+            <div class="card-info">
+              <span class="card-name" id="myName">나</span>
+              <span class="card-status-msg" id="myStatusMsg">상태메시지를 입력해보세요.</span>
+            </div>
+            <button class="memo-chat-btn" id="openSelfChatBtn" title="나와의 채팅">
+              <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+            </button>
+          </div>
+
+          <!-- Favorites Section -->
+          <div class="section-divider" id="favSectionDivider">
+            <span class="section-label">즐겨찾기</span>
+            <span class="section-count" id="favCount">0</span>
+          </div>
+          <div class="friend-list" id="favList"></div>
+
+          <!-- Friends List -->
+          <div class="section-divider">
+            <span class="section-label">친구</span>
+            <span class="section-count" id="friendCount">0</span>
+          </div>
+          <div class="friend-list" id="friendList"></div>
+        </div>
+      </section>
+
+      <!-- 2B. Chats Panel (Default) -->
+      <section class="side-panel" id="chatsPanel">
+        <header class="panel-head">
+          <h2 class="panel-title">채팅</h2>
+          <div class="panel-actions">
+            <button class="icon-btn" id="newChatBtn" title="새로운 채팅">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM17 11h-4v4h-2v-4H7V9h4V5h2v4h4v2z"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <!-- Search Input -->
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16">
+            <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+          </svg>
+          <input type="text" id="searchInput" placeholder="대화방 및 참여자 검색" autocomplete="off" />
+          <button id="clearSearch" class="clear-search" aria-label="검색어 지우기">✕</button>
+        </div>
+
+        <!-- Filter Chips -->
+        <div class="filter-chips" id="filterChips">
+          <button class="chip active" data-filter="all">전체</button>
+          <button class="chip" data-filter="unread">안 읽음</button>
+          <button class="chip" data-filter="group">그룹채팅</button>
+          <button class="chip" data-filter="memo">나와의 채팅</button>
+        </div>
+
+        <!-- Section Header -->
+        <div class="chat-section-header">
+          <span class="chat-section-title">열린 대화</span>
+          <span class="chat-total-count" id="chatTotalCount">0</span>
+        </div>
+
+        <!-- Chat Room List -->
+        <div class="chatlist" id="chatlist"></div>
+      </section>
+
+      <!-- 2C. Settings Panel -->
+      <section class="side-panel hidden" id="settingsPanel">
+        <header class="panel-head">
+          <h2 class="panel-title">설정</h2>
+        </header>
+        <div class="settings-content">
+          <div class="settings-group">
+            <h3>프로필</h3>
+            <div class="settings-item">
+              <span>내 카카오 계정</span>
+              <strong id="settingsUserId">—</strong>
+            </div>
+            <div class="settings-item">
+              <span>세션 상태</span>
+              <span class="status-pill green" id="settingsStatusPill">정상 연결됨</span>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>알림 및 소리</h3>
+            <label class="settings-row">
+              <span>메시지 수신 시 소리 알림</span>
+              <input type="checkbox" id="settingSoundCheckbox" checked />
+            </label>
+            <label class="settings-row">
+              <span>브라우저 데스크톱 알림</span>
+              <input type="checkbox" id="settingDesktopNotify" />
+            </label>
+            <div class="settings-row">
+              <span>알림음 종류</span>
+              <div class="settings-inline">
+                <select id="settingSoundType">
+                  <option value="katalk">카톡</option>
+                  <option value="watsong">카톡왔숑</option>
+                  <option value="demure">새침한 카톡</option>
+                  <option value="none">없음(무음)</option>
+                </select>
+                <button type="button" class="mini-btn" id="settingSoundPreview" title="미리듣기">▶</button>
+              </div>
+            </div>
+            <div class="settings-row settings-row-col">
+              <span>키워드 알림 <small>쉼표로 구분 · 음소거 방에서도 알림</small></span>
+              <input type="text" id="settingKeywords" class="settings-text" placeholder="예: 회의, 긴급, 내이름" autocomplete="off" />
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>보안 및 잠금</h3>
+            <label class="settings-row">
+              <span>자리 비움 시 자동 잠금 (창 벗어날 때)</span>
+              <input type="checkbox" id="settingAutoLock" />
+            </label>
+            <div class="settings-row settings-inline">
+              <span>잠금 PIN 변경</span>
+              <div class="settings-inline">
+                <input type="password" id="settingNewPin" class="settings-pin" inputmode="numeric" maxlength="8" placeholder="새 PIN" />
+                <button type="button" class="mini-btn" id="settingSavePin">저장</button>
+              </div>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>화면 및 테마</h3>
+            <div class="settings-row">
+              <span>테마 모드</span>
+              <div class="theme-buttons">
+                <button class="theme-btn" data-set-theme="light">라이트</button>
+                <button class="theme-btn" data-set-theme="dark">다크</button>
+              </div>
+            </div>
+            <div class="settings-row">
+              <span>화면 배율 <small id="settingZoomLabel">100%</small></span>
+              <input type="range" id="settingZoom" min="80" max="150" step="5" value="100" />
+            </div>
+            <div class="settings-row">
+              <span>글꼴 크기 <small id="settingFontSizeLabel">14px</small></span>
+              <input type="range" id="settingFontSize" min="12" max="18" value="14" />
+            </div>
+            <div class="settings-row">
+              <span>글꼴</span>
+              <select id="settingFontFamily">
+                <option value="system">시스템 기본</option>
+                <option value="noto">Noto Sans KR</option>
+                <option value="gothic">Apple SD Gothic / 맑은 고딕</option>
+                <option value="serif">명조 (Serif)</option>
+                <option value="mono">고정폭 (Monospace)</option>
+              </select>
+            </div>
+            <div class="settings-row">
+              <span>창 투명도 <small id="settingOpacityLabel">100%</small></span>
+              <input type="range" id="settingOpacity" min="60" max="100" step="5" value="100" />
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>대화방 배경</h3>
+            <div class="settings-row">
+              <span>배경 색상</span>
+              <div class="wallpaper-swatches" id="wallpaperSwatches">
+                <button type="button" class="wp-swatch" data-bg="#b2c7da" style="background:#b2c7da" title="기본"></button>
+                <button type="button" class="wp-swatch" data-bg="#8aa0b6" style="background:#8aa0b6" title="블루그레이"></button>
+                <button type="button" class="wp-swatch" data-bg="#c8d6b9" style="background:#c8d6b9" title="세이지"></button>
+                <button type="button" class="wp-swatch" data-bg="#e7d8c9" style="background:#e7d8c9" title="베이지"></button>
+                <button type="button" class="wp-swatch" data-bg="#1c2430" style="background:#1c2430" title="다크"></button>
+              </div>
+            </div>
+            <div class="settings-row">
+              <span>배경 이미지</span>
+              <div class="settings-inline">
+                <input type="file" id="settingWallpaperFile" accept="image/*" hidden />
+                <button type="button" class="mini-btn" id="settingWallpaperPick">이미지 선택</button>
+                <button type="button" class="mini-btn" id="settingWallpaperReset">초기화</button>
+              </div>
+            </div>
+          <div class="settings-group">
+            <h3>단축키</h3>
+            <label class="settings-row">
+              <span>Enter 키로 전송 (끄면 Shift+Enter로 전송)</span>
+              <input type="checkbox" id="settingEnterToSend" checked />
+            </label>
+            <div class="shortcut-list">
+              <div class="shortcut-item"><span>전송</span><kbd>Enter</kbd></div>
+              <div class="shortcut-item"><span>줄바꿈</span><kbd>Shift + Enter</kbd></div>
+              <div class="shortcut-item"><span>친구 탭</span><kbd>Alt + 1</kbd></div>
+              <div class="shortcut-item"><span>채팅 탭</span><kbd>Alt + 2</kbd></div>
+              <div class="shortcut-item"><span>잠금 모드</span><kbd>Ctrl + L</kbd></div>
+              <div class="shortcut-item"><span>닫기</span><kbd>ESC</kbd></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <!-- 3. Main Chat View -->
+    <main class="main" id="mainArea">
+      <!-- Chat Room Header -->
+      <header class="chat-head" id="chatHead">
+        <button class="back" id="back" aria-label="목록으로 이동">‹</button>
+        <div class="head-avatar-wrap" id="headAvatarWrap"></div>
+        <div class="head-info">
+          <div class="head-title-row">
+            <span id="chatTitle" class="head-title muted">대화방을 선택해주세요</span>
+            <span id="chatMemberCount" class="head-member-count"></span>
+          </div>
+          <span id="chatSubtitle" class="head-subtitle"></span>
+        </div>
+        <div class="head-actions" id="headActions">
+          <button class="head-btn" id="inChatSearchToggle" title="대화 내용 검색 (Ctrl+F)" aria-label="검색">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+          </button>
+          <button class="head-btn" id="roomNotifyToggle" title="알림 끄기/켜기" aria-label="알림 토글">
+            <svg id="roomBellIcon" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+          </button>
+          <button class="head-btn" id="drawerToggle" title="톡서랍 (사이드 메뉴)" aria-label="메뉴 열기">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- In-Chat Search Bar (Slide down) -->
+      <div class="inchat-search hidden" id="inChatSearchBar">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        <input type="text" id="inChatSearchInput" placeholder="대화 내용 검색..." autocomplete="off" />
+        <span class="match-count" id="inChatMatchCount">0/0</span>
+        <button id="inChatPrevBtn" class="search-nav-btn" title="이전 결과 (Shift+Enter)">▲</button>
+        <button id="inChatNextBtn" class="search-nav-btn" title="다음 결과 (Enter)">▼</button>
+        <button id="inChatCloseBtn" class="close-search-btn" title="닫기 (ESC)">✕</button>
+      </div>
+
+      <!-- Notice Banner (Pinned Announcement) -->
+      <div class="notice-banner hidden" id="noticeBanner">
+        <div class="notice-icon">📢</div>
+        <div class="notice-content">
+          <div class="notice-text" id="noticeText">공지사항 내용</div>
+        </div>
+        <button class="notice-toggle-btn" id="noticeToggleBtn" aria-label="공지 접기">▲</button>
+      </div>
+
+      <!-- Empty State -->
+      <div class="empty-state" id="emptyState">
+        <div class="empty-bubble-icon">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path fill="#fee500" d="M24 6C12.95 6 4 13.61 4 23c0 5.86 3.51 11.05 9 14.17l-2.28 8.35a1 1 0 0 0 1.25 1.21l9.95-4.32c1.33.2 2.69.31 4.08.31 11.05 0 20-7.61 20-17S35.05 6 24 6z"/>
+            <path fill="#3c1e1e" d="M24 18c-1.1 0-2 .9-2 2v6c0 1.1.9 2 2 2s2-.9 2-2v-6c0-1.1-.9-2-2-2zm-6 2c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2s2-.9 2-2v-2c0-1.1-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2s2-.9 2-2v-2c0-1.1-.9-2-2-2z"/>
+          </svg>
+        </div>
+        <h3>카카오톡 웹 클라이언트</h3>
+        <p>왼쪽 목록에서 대화를 선택하거나 친구를 더블클릭하여 대화를 시작하세요.</p>
+        <div class="empty-tip">💡 스크린샷 캡처 후 <strong>Cmd + V (붙여넣기)</strong>로 즉시 이미지를 보낼 수 있습니다.</div>
+      </div>
+
+      <!-- Messages View -->
+      <div class="messages" id="messages"></div>
+
+      <!-- Composer -->
+      <form class="composer" id="composer" autocomplete="off">
+        <!-- Quoted Reply Bar -->
+        <div class="reply-preview-bar hidden" id="replyPreviewBar">
+          <div class="reply-preview-icon">↪</div>
+          <div class="reply-preview-text">
+            <strong id="replyAuthor">작성자</strong>에게 답장: <span id="replySnippet">원문 메시지</span>
+          </div>
+          <button type="button" class="reply-close-btn" id="replyCancelBtn" title="답장 취소">✕</button>
+        </div>
+
+        <!-- Attachment Preview Bar (Pasted images / files) -->
+        <div class="attachment-preview-bar hidden" id="attachmentPreviewBar">
+          <div class="attachment-thumb" id="attachmentThumb"></div>
+          <div class="attachment-info">
+            <span class="attachment-name" id="attachmentName">screenshot.png</span>
+            <span class="attachment-size" id="attachmentSize">120 KB</span>
+          </div>
+          <button type="button" class="attachment-remove-btn" id="attachmentRemoveBtn" title="첨부 취소">✕</button>
+        </div>
+
+        <!-- Quick Emojis Bar -->
+        <div class="quick-emojis" id="quickEmojis">
+          <button type="button" class="emoji-btn" data-emoji="💛" title="노란 하트">💛</button>
+          <button type="button" class="emoji-btn" data-emoji="👍" title="따봉">👍</button>
+          <button type="button" class="emoji-btn" data-emoji="😂" title="눈물 웃음">😂</button>
+          <button type="button" class="emoji-btn" data-emoji="😭" title="눈물">😭</button>
+          <button type="button" class="emoji-btn" data-emoji="👏" title="박수">👏</button>
+          <button type="button" class="emoji-btn" data-emoji="🎉" title="축하">🎉</button>
+          <button type="button" class="emoji-btn" data-emoji="🔥" title="불">🔥</button>
+          <button type="button" class="emoji-btn" data-emoji="🙏" title="부탁/감사">🙏</button>
+          <button type="button" class="emoticon-picker-btn" id="emoticonPickerToggle" title="이모티콘 전체보기">😀 이모티콘</button>
+        </div>
+
+        <!-- Emoticon Popup Picker -->
+        <div class="emoticon-picker-panel hidden" id="emoticonPickerPanel">
+          <div class="picker-tabs">
+            <button type="button" class="picker-tab active" data-tab="kakao">카카오 프렌즈</button>
+            <button type="button" class="picker-tab" data-tab="reactions">리액션</button>
+            <button type="button" class="picker-tab" data-tab="text">텍스트 이모지</button>
+          </div>
+          <div class="picker-grid" id="emoticonGrid"></div>
+        </div>
+
+        <!-- Hidden File Input -->
+        <input type="file" id="fileInput" class="hidden" accept="image/*,video/*,.pdf,.doc,.docx,.zip,.txt" />
+
+        <!-- Input Area -->
+        <div class="composer-main">
+          <div class="composer-tools">
+            <button type="button" class="tool-btn" id="attachFileBtn" title="파일 / 사진 보내기">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+            </button>
+          </div>
+          <div class="input-wrap">
+            <textarea id="input" rows="1" placeholder="메시지를 입력하세요 (Shift + Enter 줄바꿈)" disabled></textarea>
+          </div>
+          <div class="composer-actions">
+            <button id="send" disabled>전송</button>
+          </div>
+        </div>
+      </form>
+    </main>
+
+    <!-- 4. Right Chat Drawer (톡서랍 & 참여자 목록) -->
+    <aside class="chat-drawer hidden" id="chatDrawer">
+      <header class="drawer-head">
+        <h3 class="drawer-title">톡서랍</h3>
+        <button class="drawer-close" id="drawerCloseBtn" aria-label="서랍 닫기">✕</button>
+      </header>
+
+      <!-- Drawer Tabs -->
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-drawer-tab="members">참여자</button>
+        <button class="drawer-tab" data-drawer-tab="media">사진/동영상</button>
+        <button class="drawer-tab" data-drawer-tab="files">파일</button>
+        <button class="drawer-tab" data-drawer-tab="links">링크</button>
+      </div>
+
+      <!-- Drawer Tab Panes -->
+      <div class="drawer-pane" id="drawerMembersPane">
+        <div class="drawer-member-list" id="drawerMemberList"></div>
+      </div>
+      <div class="drawer-pane hidden" id="drawerMediaPane">
+        <div class="drawer-media-grid" id="drawerMediaGrid"></div>
+      </div>
+      <div class="drawer-pane hidden" id="drawerFilesPane">
+        <div class="drawer-files-list" id="drawerFilesList"></div>
+      </div>
+      <div class="drawer-pane hidden" id="drawerLinksPane">
+        <div class="drawer-links-list" id="drawerLinksList"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 5. Friend Profile Modal -->
+  <div id="friendProfileModal" class="modal-overlay hidden">
+    <div class="profile-popup">
+      <button class="modal-close-btn" id="closeProfileModal">✕</button>
+      <div class="profile-header-banner" id="profileHeaderBanner"></div>
+      <div class="profile-avatar-center" id="profileModalAvatarWrap">
+        <span class="avatar large-avatar" id="profileModalAvatar">?</span>
+      </div>
+      <div class="profile-body-center">
+        <h2 class="profile-modal-name" id="profileModalName">이름</h2>
+        <p class="profile-modal-status" id="profileModalStatus">상태메시지</p>
+      </div>
+      <div class="profile-actions-bottom">
+        <button class="profile-act-btn" id="profileChatBtn">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+          <span>1:1 대화</span>
+        </button>
+        <button class="profile-act-btn" id="profileVoiceBtn">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.44-5.15-3.75-6.59-6.59l1.97-1.57c.28-.28.37-.67.25-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/></svg>
+          <span>보이스톡</span>
+        </button>
+        <button class="profile-act-btn" id="profileFavToggleBtn">
+          <span id="profileFavStar">⭐</span>
+          <span id="profileFavLabel">즐겨찾기</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. Lock Mode Overlay -->
+  <div id="lockScreenOverlay" class="lock-overlay hidden">
+    <div class="lock-box">
+      <div class="lock-avatar-center">
+        <svg viewBox="0 0 32 32" width="48" height="48">
+          <path fill="#fee500" d="M16 4C9.37 4 4 8.57 4 14.2c0 3.52 2.11 6.63 5.4 8.5l-1.37 5.01a0.6 0.6 0 0 0 .75.73l5.97-2.59c.4.04.81.07 1.25.07 6.63 0 12-4.57 12-10.2S22.63 4 16 4z"/>
+        </svg>
+      </div>
+      <h2 class="lock-title">카카오톡 잠금 모드</h2>
+      <p class="lock-desc">비밀번호를 입력하여 잠금을 해제하세요.</p>
+      <form id="lockForm" class="lock-form">
+        <input type="password" id="lockInput" placeholder="비밀번호 (기본: 1234)" autofocus autocomplete="off" />
+        <button type="submit" id="lockSubmitBtn">해제</button>
+      </form>
+      <div class="lock-hint">초기 기본 비밀번호: 1234</div>
+    </div>
+  </div>
+
+  <!-- 7. Image Lightbox Modal -->
+  <div id="imageLightbox" class="lightbox hidden">
+    <div class="lightbox-overlay" id="lightboxOverlay"></div>
+    <div class="lightbox-content">
+      <button id="closeLightbox" class="lightbox-close" aria-label="닫기">✕</button>
+      <img id="lightboxImg" src="" alt="미리보기 이미지" />
+      <div class="lightbox-actions">
+        <a id="lightboxDownload" href="" download class="lightbox-download-btn">원본 다운로드 💾</a>
+      </div>
+      <div class="lightbox-caption" id="lightboxCaption"></div>
+    </div>
+  </div>
+
+  <!-- 8. Right-Click Context Menu -->
+  <div id="contextMenu" class="context-menu hidden">
+    <button class="context-item" id="ctxCopyText">텍스트 복사</button>
+    <button class="context-item" id="ctxReply">답장</button>
+    <button class="context-item" id="ctxForward">전달</button>
+    <button class="context-item" id="ctxPinNotice">공지 등록</button>
+    <div class="context-separator"></div>
+    <button class="context-item" id="ctxSelfDelete">나에게서 삭제</button>
+    <button class="context-item danger" id="ctxDelete">삭제 (모두에게서)</button>
+  </div>
+
+  <!-- Forward target picker -->
+  <div id="forwardModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <header class="modal-head"><h3>전달할 대화방 선택</h3><button id="forwardClose" class="close-x">✕</button></header>
+      <input type="text" id="forwardSearch" class="forward-search" placeholder="대화방 검색..." autocomplete="off" />
+      <div id="forwardChatList" class="forward-chat-list"></div>
+    </div>
+  </div>
+
+  <!-- Daemon confirmation dialog for an action started here (text is the daemon's, shown as plain text) -->
+  <div id="approvalModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="approvalTitle">
+    <div class="modal-card approval-card">
+      <header class="modal-head"><h3 id="approvalTitle">승인 요청</h3><span id="approvalQueue" class="approval-queue"></span></header>
+      <pre id="approvalMessage" class="approval-message"></pre>
+      <form id="approvalForm" class="approval-form" autocomplete="off">
+        <label for="approvalCode" id="approvalCodeLabel">확인 코드</label>
+        <input type="text" id="approvalCode" maxlength="16" spellcheck="false" autocapitalize="characters" />
+        <small id="approvalCodeHint" class="approval-hint"></small>
+        <label id="approvalRememberRow" class="approval-remember hidden"><input type="checkbox" id="approvalRemember" aria-labelledby="approvalRememberLabel" /> <span id="approvalRememberLabel"></span></label>
+        <div id="approvalError" class="approval-error" role="alert"></div>
+        <div class="approval-actions">
+          <button type="button" id="approvalCancel" class="approval-btn">닫기</button>
+          <button type="button" id="approvalDecline" class="approval-btn danger">거절</button>
+          <button type="submit" id="approvalAccept" class="approval-btn primary">승인</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- @mention autocomplete dropdown -->
+  <div id="mentionDropdown" class="mention-dropdown hidden"></div>
+
+  <div id="chatContextMenu" class="context-menu hidden">
+    <button class="context-item" id="ctxChatPin">상단 고정</button>
+    <button class="context-item" id="ctxChatMute">알림 끄기</button>
+    <div class="context-separator"></div>
+    <button class="context-item danger" id="ctxChatLeave">채팅방 나가기</button>
+  <script src="app.js"></script>
+</body>
+</html>

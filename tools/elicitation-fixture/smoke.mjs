@@ -1,0 +1,23 @@
+// Simulated modern client: discover → prepare → send (expect input_required) → retry with accept.
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+const [node, script] = process.argv.slice(2);
+const child = spawn(node, ['--experimental-strip-types', '--no-warnings', script], { stdio: ['pipe', 'pipe', 'inherit'] });
+let buf = '', id = 0; const waiting = new Map();
+child.stdout.on('data', c => { buf += c; let n; while ((n = buf.indexOf('\n')) >= 0) { const r = JSON.parse(buf.slice(0, n)); buf = buf.slice(n + 1); waiting.get(r.id)?.(r); } });
+const meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientInfo': { name: 'smoke', version: '1' }, 'io.modelcontextprotocol/clientCapabilities': { elicitation: { form: {} } } };
+const call = (method, params = {}) => new Promise(res => { const i = ++id; waiting.set(i, res); child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method, params: { _meta: meta, ...params } }) + '\n'); });
+const d = await call('server/discover'); console.log('discover', d.result.supportedVersions, d.result.resultType);
+const l = await call('tools/list'); console.log('tools', l.result.tools.map(t => t.name));
+const args = { requestId: randomUUID(), chatId: '123456789', text: '확인 창 테스트' };
+const p = await call('tools/call', { name: 'prepare_message', arguments: args }); console.log('prepare', JSON.parse(p.result.content[0].text).state);
+const a = await call('tools/call', { name: 'send_message', arguments: args }); console.log('send →', a.result.resultType); console.log(a.result.inputRequests.approve.params.message);
+const enter = await call('tools/call', { name: 'send_message', arguments: args, requestState: a.result.requestState, inputResponses: { approve: { action: 'accept', content: {} } } });
+console.log('Enter only →', enter.result.resultType);
+const code = /확인 코드 ([A-Z2-9]{4})/.exec(enter.result.inputRequests.approve.params.message)[1];
+const r = await call('tools/call', { name: 'send_message', arguments: args, requestState: enter.result.requestState, inputResponses: { approve: { action: 'accept', content: { code, remember: true } } } });
+console.log('code + remember →', r.result.resultType, r.result.isError, JSON.parse(r.result.content[0].text).state);
+const args2 = { requestId: randomUUID(), chatId: '123456789', text: '두 번째' };
+const p2 = await call('tools/call', { name: 'prepare_message', arguments: args2 }); console.log('second prepare approvalRequired', JSON.parse(p2.result.content[0].text).approvalRequired);
+const s2 = await call('tools/call', { name: 'send_message', arguments: args2 }); console.log('second send →', s2.result.resultType, JSON.parse(s2.result.content[0].text).state);
+child.stdin.end();

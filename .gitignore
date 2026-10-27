@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+rea/
+
+# Build artifacts
+dist/
+build/
+.turbo/
+
+# Environment and sensitive files
+.env
+.env.*
+*.pem
+*.key
+*.pcap
+*.pcapng
+*.har
+secrets/
+
+# Account stores, exports and enrollment state (never fixtures in source files)
+.kakao/
+.kakao-max/
+vault/
+downloads/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+messages.jsonl*
+frames.jsonl*
+friends.json*
+known-chats.json*
+credentials.json*
+approvers.json*
+approver-enroll.json*
+auth-relogin.json*
+install-state.json*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# TypeScript incremental build state
+*.tsbuildinfo
+
+# Host operation bytecode caches
+__pycache__/
+*.pyc

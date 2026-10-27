@@ -1,0 +1,3 @@
+#!/bin/sh
+# Check every commit about to leave this machine: messages, added lines and file names.
+exec node scripts/check-private-terms.mjs --pre-push "$1"

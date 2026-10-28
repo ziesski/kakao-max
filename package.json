@@ -38,7 +38,7 @@
     "check:publication": "node scripts/check-publication.mjs",
     "check:private-terms": "node scripts/check-private-terms.mjs --tree HEAD",
     "pretest": "npm run build --workspace=@kakao-max/protocol",
-    "test": "npm run test --workspaces --if-present",
+    "test": "node --test scripts/check-private-terms.test.mjs && npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "build:package": "node scripts/build-package.mjs",
     "check:package": "node scripts/check-package.mjs",

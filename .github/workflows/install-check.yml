@@ -1,0 +1,91 @@
+name: install-check
+
+# Follow the README server install on a fresh Ubuntu VM with a root-owned system Node, from the published npm
+# package and from a Git clone of main. The wizard runs up to the Kakao account prompt, which is left empty, so
+# setup stops before any Kakao request. Then the installed files, service account and pinned state are checked.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/install-check.yml
+      - .github/install-check/**
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [package, git]
+    runs-on: ubuntu-24.04
+    env:
+      NODE_VERSION: v22.23.4
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/install-check
+      - name: Install a root-owned system Node and expect
+        run: |
+          base="https://nodejs.org/dist/$NODE_VERSION"
+          file="node-$NODE_VERSION-linux-x64.tar.xz"
+          curl -fsSL "$base/$file" -o "$RUNNER_TEMP/$file"
+          curl -fsSL "$base/SHASUMS256.txt" | grep " $file\$" | (cd "$RUNNER_TEMP" && sha256sum --check --strict)
+          sudo tar -xJf "$RUNNER_TEMP/$file" -C /usr/local --strip-components=1 --no-same-owner
+          sudo apt-get install -y --no-install-recommends expect >/dev/null
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          /usr/local/bin/node --version
+      - name: Install the published package system-wide
+        if: matrix.source == 'package'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=latest
+          if [ -n "$TAG" ]; then version="${TAG#v}"; fi
+          sudo /usr/local/bin/npm install --global --no-audit --no-fund "kakao-max@$version"
+          kakao-max --version
+          echo "SETUP_COMMAND=kakao-max setup" >> "$GITHUB_ENV"
+      - name: Clone main as the README describes
+        if: matrix.source == 'git'
+        run: |
+          git clone --quiet https://github.com/ziesski/kakao-max.git "$HOME/kakao-max"
+          cd "$HOME/kakao-max"
+          npm ci --no-audit --no-fund
+          echo "SETUP_COMMAND=npm run setup" >> "$GITHUB_ENV"
+          echo "SETUP_DIR=$HOME/kakao-max" >> "$GITHUB_ENV"
+      - name: Run setup up to the Kakao account prompt
+        run: |
+          cd "${SETUP_DIR:-$HOME}"
+          expect "$GITHUB_WORKSPACE/.github/install-check/setup-to-account-prompt.exp" $SETUP_COMMAND
+      - name: Check what the install left behind
+        env:
+          SOURCE: ${{ matrix.source }}
+        run: |
+          fail() { echo "install-check: $*" >&2; exit 1; }
+          getent passwd kakao-max >/dev/null || fail "service account missing"
+          sudo test -d /var/lib/kakao-max/data || fail "data directory missing"
+          [ "$(sudo stat -c %U /var/lib/kakao-max/data)" = kakao-max ] || fail "data directory not owned by kakao-max"
+          [ "$(sudo stat -c %a /var/lib/kakao-max/data)" = 700 ] || fail "data directory is not 0700"
+          [ "$(sudo stat -c %U /var/lib/kakao-max/app)" = root ] || fail "app directory not root-owned"
+          state=$(sudo cat /var/lib/kakao-max/install-state.json)
+          echo "$state" | jq '{version, release, commit, phase, port, digest: (.digest != null), deviceUuid: (.deviceUuid != null)}'
+          [ "$(echo "$state" | jq -r .phase)" = prepared ] || fail "unexpected install phase"
+          [ "$(echo "$state" | jq -r '.deviceUuid // empty')" = "" ] || fail "a device identity was created"
+          sudo test ! -e /var/lib/kakao-max/app/.env.local || fail "credentials file exists"
+          test ! -e /etc/systemd/system/kakao-max.service || fail "service unit was installed before login"
+          if [ "$SOURCE" = package ]; then
+            [ "$(echo "$state" | jq -r .version)" = 2 ] || fail "package install should record state version 2"
+            [ "$(echo "$state" | jq -r .release)" = "$(kakao-max --version)" ] || fail "pinned release differs from the installed package"
+            sudo test -f /var/lib/kakao-max/app/dist/mcp.mjs || fail "daemon bundle missing"
+          else
+            [ "$(echo "$state" | jq -r .version)" = 1 ] || fail "Git install should record state version 1"
+            [ "$(echo "$state" | jq -r .commit)" = "$(git -C "$HOME/kakao-max" rev-parse origin/main)" ] || fail "pinned commit differs from origin/main"
+            sudo test -f /var/lib/kakao-max/app/packages/protocol/dist/index.js || fail "protocol build missing"
+          fi
+          echo "install-check: $SOURCE install stopped at the account prompt with no credentials, device or service"

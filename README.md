@@ -122,7 +122,7 @@ AI가 대화에서 최종 약속을 찾아 요약하고, 실제 카카오톡 대
    **새 Linux 서버 설치**를 고르면 환경과 Git 버전을 확인하고, 전용 `kakao-max` 서비스 계정에 설치한 뒤
    휴대폰 카카오톡 승인(또는 4자리 코드)으로 로그인합니다. 내용을 확인하고 승인하면 systemd 서비스로 등록·시작합니다.
    Linux/systemd, Git, sudo, 시스템 경로에 설치된 Node(strip-types와 `node:sqlite` 지원, CI는 Node 22)가 필요합니다.
-   버전을 고정한 [npm 패키지 설치](docs/runbooks/package.md#linux-서비스-설치-버전-고정)도 있지만, 실제 서버에서는 아직 검증 전입니다.
+   버전을 고정한 [npm 패키지 설치](docs/runbooks/package.md#linux-서비스-설치-버전-고정)도 있습니다. 새 서버에서 계정 입력 직전까지는 릴리스마다 자동 확인하지만, 로그인 이후는 아직 실제 서버에서 검증 전입니다.
 2. **내 AI에 연결합니다.** AI를 쓰는 컴퓨터에서 마법사의 **기존 데몬 연결**을 고르면 SSH로 서버의 데몬에 붙는
    MCP 설정을 `~/.config/kakao-max/mcp.json`에 만듭니다. `mcpServers["kakao-max"]` 항목을 AI 클라이언트에 등록하세요.
    서버 코드와 카카오 자격증명은 AI 컴퓨터로 옮기지 않습니다.

@@ -43,6 +43,8 @@ try {
 
   const help = run(bin('kakao-max'), ['help']);
   check(help.status === 0 && help.stdout.includes('kakao setup'), 'kakao-max help runs');
+  const version = run(bin('kakao-max'), ['--version']);
+  check(version.status === 0 && version.stdout.trim() === info.version, `kakao-max --version prints ${info.version}`);
 
   const config = run(bin('kakao-max'), ['setup', '--config', '--listen', '127.0.0.1:8787']);
   let args = [];

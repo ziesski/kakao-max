@@ -19,7 +19,7 @@ npm run setup
 
 ## 2. AI를 쓰는 컴퓨터에서 연결
 
-그 컴퓨터에서도 저장소와 의존성을 준비한 뒤 `npm run setup`을 실행하고 `기존 데몬 연결`을 선택합니다. SSH 대상과 설치 때 선택한 서버 loopback 주소/포트를 입력합니다. SSH 대상은 `operator@server` 또는 자신의 SSH 별칭입니다. 공개 네트워크에 MCP 포트를 열 필요는 없습니다.
+그 컴퓨터에 kakao-max를 설치합니다. `npm install -g kakao-max`, macOS는 `brew install ziesski/tap/kakao-max`, Windows는 Scoop의 `ziesski/scoop-bucket`에서 설치할 수 있습니다([README](../README.md#getting-started)). 그다음 `kakao-max setup`(Git 체크아웃에서는 `npm run setup`)을 실행하고 `기존 데몬 연결`을 선택합니다. SSH 대상과 설치 때 선택한 서버 loopback 주소/포트를 입력합니다. SSH 대상은 `operator@server` 또는 자신의 SSH 별칭입니다. 공개 네트워크에 MCP 포트를 열 필요는 없습니다.
 
 마법사가 연결을 진단하고 MCP 설정을 출력합니다. 출력한 설정을 AI 클라이언트가 지원하는 MCP 설정 형식에 등록합니다. 새 설정 키는 `kakao-max`이며 기존 사용자의 `kakaotalk` 키 설정도 그대로 계속 동작합니다. 클라이언트 설정은 허락 없이 덮어쓰지 않습니다.
 

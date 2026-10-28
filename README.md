@@ -122,13 +122,24 @@ AI가 대화에서 최종 약속을 찾아 요약하고, 실제 카카오톡 대
    **새 Linux 서버 설치**를 고르면 환경과 Git 버전을 확인하고, 전용 `kakao-max` 서비스 계정에 설치한 뒤
    휴대폰 카카오톡 승인(또는 4자리 코드)으로 로그인합니다. 내용을 확인하고 승인하면 systemd 서비스로 등록·시작합니다.
    Linux/systemd, Git, sudo, 시스템 경로에 설치된 Node(strip-types와 `node:sqlite` 지원, CI는 Node 22)가 필요합니다.
+   버전을 고정한 [npm 패키지 설치](docs/runbooks/package.md#linux-서비스-설치-버전-고정)도 있지만, 실제 서버에서는 아직 검증 전입니다.
 2. **내 AI에 연결합니다.** AI를 쓰는 컴퓨터에서 마법사의 **기존 데몬 연결**을 고르면 SSH로 서버의 데몬에 붙는
    MCP 설정을 `~/.config/kakao-max/mcp.json`에 만듭니다. `mcpServers["kakao-max"]` 항목을 AI 클라이언트에 등록하세요.
    서버 코드와 카카오 자격증명은 AI 컴퓨터로 옮기지 않습니다.
 
+   AI를 쓰는 컴퓨터에는 패키지로 설치하면 됩니다. 셋 중 하나를 고르세요.
+
    ```bash
-   npm run --silent setup -- --config --ssh <SSH-대상>
+   npm install -g kakao-max                                   # Node.js 22.18 이상
+   brew install ziesski/tap/kakao-max                         # macOS
+   scoop bucket add ziesski https://github.com/ziesski/scoop-bucket && scoop install ziesski/kakao-max   # Windows
    ```
+
+   ```bash
+   kakao-max setup --config --ssh <SSH-대상>
+   ```
+
+   Git 체크아웃에서는 `npm run --silent setup -- --config --ssh <SSH-대상>`로 같은 설정을 만듭니다.
 3. **범위를 정하고 요청합니다.** “홍길동에게 내일 3시에 보자고 카톡 보내 줘.” 첫 메시지는 확인 창에서 승인하고,
    “앞으로 묻지 않기”를 고르면 그 방의 후속 전송은 하루 한도 안에서 바로 보냅니다. 대화 조회와 읽음 표시는 전송 허가와 별개로 묻습니다.
 

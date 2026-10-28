@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Conversation, type MessageWriter, type WriteResult } from './conversation.ts';
-import type { UserReader, UserMessage } from '@kakao-max/core';
+import type { ConversationReader, ConversationMessage } from './types.ts';
 
-const m = (n: number, text = 'fixture'): UserMessage => ({ messageId: String(n), authorId: '1', text, type: 1 });
+const m = (n: number, text = 'fixture'): ConversationMessage => ({ messageId: String(n), authorId: '1', text, type: 1 });
 function fixture() {
   let rows = [m(10)], removed: string[] = [], reset = false, error: Error | undefined;
   const ids: string[] = [];
   let write: WriteResult = { ok: true, messageId: '20' };
-  const reader: UserReader = { async status() { return { connected: true, userId: '1' }; }, async rooms() { return [{ id: '1', title: 'fixture A' }, { id: '2', title: 'fixture B' }]; },
+  const reader: ConversationReader = { async status() { return { connected: true, userId: '1' }; }, async rooms() { return [{ id: '1', title: 'fixture A' }, { id: '2', title: 'fixture B' }]; },
     async history() { if (error) throw error; return { messages: rows, hasMore: false }; },
     async updates() { if (error) throw error; return { messages: rows, removedIds: removed, reset }; } };
   const writer: MessageWriter = { async identity() { return { connected: true, userId: '1' }; }, async send(_room, _text, id) { ids.push(id); return write; } };
   const conversation = new Conversation(reader, writer, () => {});
-  return { conversation, reader, writer, ids, setRows: (r: UserMessage[]) => { rows = r; }, setRemoved: (r: string[]) => { removed = r; },
+  return { conversation, reader, writer, ids, setRows: (r: ConversationMessage[]) => { rows = r; }, setRemoved: (r: string[]) => { removed = r; },
     setReset: (r: boolean) => { reset = r; }, setError: (e?: Error) => { error = e; }, setWrite: (r: WriteResult) => { write = r; } };
 }
 
@@ -31,7 +31,7 @@ test('conversation merges edits/deletions and bounds memory without duplicate me
 
 test('late history for a previous room cannot populate the newly selected room', async () => {
   const f = fixture(); await f.conversation.start();
-  let finish!: (value: { messages: UserMessage[]; hasMore: boolean }) => void;
+  let finish!: (value: { messages: ConversationMessage[]; hasMore: boolean }) => void;
   f.reader.history = room => room === '1' ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ messages: [m(200)], hasMore: false });
   const first = f.conversation.open('1'); await f.conversation.open('2');
   finish({ messages: [m(100, 'wrong room')], hasMore: false }); await first;
@@ -106,4 +106,21 @@ test('failed or missing identity handshake cannot be skipped by refreshing or op
   await assert.rejects(f.conversation.start(), { code: 'ACCOUNT_MISMATCH' });
   await assert.rejects(f.conversation.refresh(), { code: 'NOT_CONNECTED' });
   assert.equal(f.conversation.active, undefined);
+});
+
+
+test('late polls cannot advance the cursor after an explicit history refresh', async () => {
+  const f = fixture(); await f.conversation.start(); await f.conversation.open('1');
+  let finish!: (v: any) => void;
+  const cursors: (number | undefined)[] = [];
+  f.reader.updates = async (_room, _after, _visible, cursor) => {
+    cursors.push(cursor);
+    if (cursors.length === 1) return new Promise(resolve => { finish = resolve; });
+    return { messages: [], removedIds: [], reset: false, cursor: 2 };
+  };
+  const old = f.conversation.poll(); await f.conversation.refresh();
+  await f.conversation.poll();
+  finish({ messages: [], removedIds: [], reset: false, cursor: 900 }); await old;
+  await f.conversation.poll();
+  assert.deepEqual(cursors, [0, 0, 2]);
 });

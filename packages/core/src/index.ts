@@ -32,4 +32,3 @@ export { AgentOperationEngine, AGENT_CONTROL_DEFINITIONS, AGENT_CONTROL_ACTIONS,
 export { ApprovalStore, ApproverRegistry, approvalChallenge, rpIdForOrigin, verifyWebAuthnRegistration, readOwnerOnlyJson, writeOwnerOnlyJson, type WebAuthnAssertion, type ApprovalEvent } from './approvals.ts';
 export { LocalVault, type VaultStats, type ExportChatResult } from './local-vault.ts';
 export { collectSharedLinks, extractScheduleAndTodos, type SharedLinkItem, type SharedLinksResult, type ExtractedScheduleItem, type ExtractedTodoItem, type ExtractedScheduleAndTodos } from './curation-tools.ts';
-export { UserReadService, USER_READ_VERSION, USER_READ_LIMITS, type UserReader, type UserRoom, type UserMessage, type UserHistory, type UserUpdates } from './user-read.ts';

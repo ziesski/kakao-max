@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { loadConfig, toKakaoError, programArgs } from '@kakao-max/core';
+import { loadConfig, toKakaoError, programArgs, installRoot } from '@kakao-max/core';
 import { resolveRoom } from './room-resolution.ts';
 import { randomUUID } from 'node:crypto';
 import { sendMessage, sendPhotos, submitWrite, approvalLink } from './agent-send-client.ts';
@@ -540,6 +541,7 @@ ${c.bold}사용 가능한 명령어:${c.reset}
   승인이 필요하면 링크가 출력됩니다. 승인한 뒤 같은 명령에 ${c.cyan}--request-id <id>${c.reset}를 붙여 다시 실행하세요.
   ${c.cyan}kakao status${c.reset}                            현재 LOCO 세션 연결 상태 확인
   ${c.cyan}kakao help${c.reset}                              도움말 보기
+  ${c.cyan}kakao --version${c.reset}                         설치된 kakao-max 버전 보기
   ${c.cyan}kakao setup${c.reset} [--doctor|--repair|--update]   데몬 설치·연결 마법사
   ${c.cyan}kakao web${c.reset}                               내 브라우저용 로컬 웹 화면 시작
   ${c.cyan}kakao approver${c.reset} enroll|list|remove <id>     승인 패스키 관리(데몬 서버 터미널)
@@ -643,6 +645,11 @@ async function main() {
     case '--help':
     case '-h':
       cmdHelp();
+      break;
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log(JSON.parse(fs.readFileSync(path.join(installRoot(), 'package.json'), 'utf8')).version);
       break;
     default:
       if (!cmd) {

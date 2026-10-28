@@ -9,12 +9,18 @@ import { sendMessage, sendPhotos, submitWrite, approvalLink } from './agent-send
 import { runAgentFileCommand, readAgentRequest } from './agent-send-files.ts';
 import { McpClient, McpToolError } from './mcp-client.ts';
 import { readRoomSmokeAccess } from './smoke-read-scope.ts';
+import { runChatShell } from './chat-shell.ts';
+import { runTerminalMessenger } from './terminal-messenger.ts';
+import { proxyUserConnection } from './user-connection.ts';
 
 // ----------------------------------------------------------------------------
-// KakaoTalk headless CLI — a thin client over the MCP daemon (see mcp-client.ts)
+// Command CLI over agent MCP; human chat reads use the private owner interface (see mcp-client.ts)
 // ----------------------------------------------------------------------------
 
-const { mcpPort: MCP_PORT, mcpHost: MCP_HOST } = loadConfig();
+// The privileged stdio proxy only needs its explicit socket argument, never account settings.
+const config = process.argv[2] === 'user-connect' ? undefined : loadConfig();
+const MCP_HOST = config?.mcpHost ?? '127.0.0.1', MCP_PORT = config?.mcpPort ?? 8787;
+const DATA_DIR = config?.dataDir ?? '', USER_SOCKET = config?.userSocket, USER_COMMAND = config?.userCommand;
 
 // ANSI color helpers
 const c = {
@@ -527,6 +533,9 @@ ${c.bold}KakaoTalk Native Terminal CLI${c.reset}
 카카오톡을 리눅스/macOS 터미널에서 제어하는 커맨드라인 도구입니다.
 
 ${c.bold}사용 가능한 명령어:${c.reset}
+  ${c.cyan}kakao chat${c.reset}                             방 검색·방향키·입력창으로 쓰는 터미널 메신저
+  ${c.cyan}kakao shell${c.reset}                            ls/cd/Tab으로 방을 고르고 대화하기
+  ${c.cyan}kakao shell --demo --show-room "공개할 방"${c.reset}  다른 방 이름을 숨기는 촬영 모드
   ${c.cyan}kakao ls${c.reset} (또는 ${c.cyan}list${c.reset})                       대화방 목록과 안읽은 메시지 확인
   ${c.cyan}kakao friends [검색어]${c.reset}                  카카오톡 친구 목록 및 연락처 검색
   ${c.cyan}kakao history <대화방/친구> [개수]${c.reset}     과거 대화 내역 조회 (단축: hist)
@@ -578,6 +587,16 @@ async function main() {
   const option = (name: string) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1]; };
 
   switch (cmd) {
+    case 'user-connect':
+      if (!option('--socket')) throw new Error('Usage: kakao user-connect --socket <private owner socket>');
+      await proxyUserConnection(option('--socket')!);
+      break;
+    case 'chat':
+      await runTerminalMessenger(args, { host: MCP_HOST, port: MCP_PORT, dataDir: DATA_DIR, userSocket: USER_SOCKET, userCommand: USER_COMMAND });
+      break;
+    case 'shell':
+      await runChatShell(args, { host: MCP_HOST, port: MCP_PORT });
+      break;
     case 'ls':
     case 'list':
       await cmdList();

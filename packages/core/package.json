@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./user-read": "./src/user-read.ts"
   },
   "scripts": {
     "test": "node --experimental-strip-types --test src/*.test.ts"

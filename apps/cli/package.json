@@ -8,7 +8,8 @@
     "kakao": "./src/index.ts"
   },
   "dependencies": {
-    "@kakao-max/core": "*"
+    "@kakao-max/core": "*",
+    "@kakao-max/client": "*"
   },
   "scripts": {
     "kakao-max": "node --experimental-strip-types src/index.ts",

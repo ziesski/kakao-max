@@ -237,3 +237,12 @@ test('CLI MCP host accepts hostnames and IPs but rejects URL and whitespace inpu
     assert.throws(() => loadConfig({ envPath: NO_FILE, env: { MCP_HOST: value } }), { code: 'CONFIG_INVALID' }, value);
   }
 });
+
+test('owner read connection config is explicit argv, mutually exclusive and never a role flag', () => {
+  const config = loadConfig({ envPath: NO_FILE, env: { KAKAO_USER_COMMAND: '["ssh","-T","server.test","kakao-max","user-connect"]' } });
+  assert.deepEqual(config.userCommand, ['ssh', '-T', 'server.test', 'kakao-max', 'user-connect']);
+  for (const value of ['"shell command"', '[]', '["ssh",42]', '["ssh","bad\\narg"]']) {
+    assert.throws(() => loadConfig({ envPath: NO_FILE, env: { KAKAO_USER_COMMAND: value } }), { code: 'CONFIG_INVALID' });
+  }
+  assert.throws(() => loadConfig({ envPath: NO_FILE, env: { KAKAO_USER_SOCKET: '/fixture', KAKAO_USER_COMMAND: '["fixture"]' } }), { code: 'CONFIG_INVALID' });
+});

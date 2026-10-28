@@ -33,6 +33,12 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+export interface ElicitationReply {
+  action: 'accept' | 'decline' | 'cancel';
+  content?: Record<string, unknown>;
+}
+export type ElicitationHandler = (params: Record<string, any>) => Promise<ElicitationReply>;
+
 export class McpClient {
   private socket?: net.Socket;
   private reqId = 0;
@@ -40,11 +46,14 @@ export class McpClient {
   private readonly host: string;
   private readonly port: number;
   private readonly timeoutMs: number;
+  private readonly onElicitation?: ElicitationHandler;
+  private asking = false;
 
-  constructor(opts: { host: string; port: number; timeoutMs?: number }) {
+  constructor(opts: { host: string; port: number; timeoutMs?: number; onElicitation?: ElicitationHandler }) {
     this.host = opts.host;
     this.port = opts.port;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.onElicitation = opts.onElicitation;
   }
 
   async connect(): Promise<void> {
@@ -58,7 +67,10 @@ export class McpClient {
     s.on('close', () => this.failAll(new Error('MCP daemon closed the connection')));
     // readline re-emits socket errors, already reported through failAll above.
     readline.createInterface({ input: s }).on('error', () => {}).on('line', (line) => this.onLine(line));
-    await this.request('initialize', { clientInfo: { name: 'kakao-max-cli', version: '0.1.0' } });
+    await this.request('initialize', {
+      clientInfo: { name: 'kakao-max-cli', version: '0.1.0' },
+      ...(this.onElicitation ? { protocolVersion: '2025-11-25', capabilities: { elicitation: { form: {} } } } : {})
+    });
   }
 
   /** Raw JSON-RPC request; rejects on a JSON-RPC error or timeout. */
@@ -103,6 +115,22 @@ export class McpClient {
       msg = JSON.parse(line);
     } catch {
       return; // not a JSON-RPC frame (the daemon only writes JSON, so this is noise)
+    }
+    if (msg.method === 'elicitation/create' && (typeof msg.id === 'string' || typeof msg.id === 'number')) {
+      if (!this.onElicitation || this.asking || !this.pending.size) {
+        this.socket?.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { action: 'cancel' } }) + '\n');
+        return;
+      }
+      this.asking = true;
+      const socket = this.socket;
+      const waiting = [...this.pending.keys()];
+      void this.onElicitation(msg.params ?? {}).catch((): ElicitationReply => ({ action: 'cancel' })).then(result => {
+        // Never send a late answer on a replacement connection or after the calling request timed out.
+        if (socket && !socket.destroyed && socket === this.socket && waiting.some(id => this.pending.has(id))) {
+          socket.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\n');
+        }
+      }).finally(() => { this.asking = false; });
+      return;
     }
     const p = msg.id != null ? this.pending.get(msg.id) : undefined;
     if (!p) return;

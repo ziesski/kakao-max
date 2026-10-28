@@ -1,6 +1,6 @@
 # npm 패키지
 
-`kakao-max`는 npm 패키지 하나로 배포할 수 있게 빌드됩니다. 아직 npm에 게시하지 않았습니다. 게시는 저장소 공개 후 별도 결정입니다.
+`kakao-max`는 npm 패키지 하나로 배포할 수 있게 빌드됩니다. 게시는 [게시](#게시) 절차를 따릅니다.
 
 ## 패키지 구성
 
@@ -51,3 +51,23 @@ npm run check:package
 - `kakao-max-web`이 화면을 띄우고 실행 링크 없는 요청을 거부함
 
 CI의 `package` 작업이 Linux·macOS·Windows에서 이 점검을 실행합니다. 게시는 하지 않습니다.
+
+## 게시
+
+`main`에 있는 커밋에 `package.json`의 버전과 같은 `v<버전>` 태그를 push하면 `publish` 워크플로가 게시합니다.
+npm trusted publishing(OIDC)을 쓰므로 저장소에 npm 토큰을 두지 않고, 게시본에는 빌드 출처(provenance)가 붙습니다.
+
+- 워크플로는 태그와 버전이 다르거나 태그 커밋이 `main`에 없으면 멈춥니다. 게시 전에 typecheck, 테스트,
+  `check:publication`, `check:package`를 다시 실행합니다.
+- 작업은 GitHub `npm` environment에서 실행됩니다. 이 environment에 필수 검토자를 두면 사람이 승인해야 게시됩니다.
+- 태그 없이 수동 실행하면 `npm publish --dry-run`만 하고 게시하지 않습니다.
+- 게시한 버전은 덮어쓸 수 없습니다. 문제가 있으면 새 버전을 게시하고, 필요하면 `npm deprecate`로 표시합니다.
+
+처음 한 번은 관리자가 직접 준비합니다. 게시 계정은 실명이 아닌 프로젝트 계정을 씁니다.
+
+1. GitHub 저장소 설정에서 `npm` environment를 만들고 필수 검토자를 지정합니다.
+2. npmjs.com에서 패키지의 Trusted Publisher로 이 저장소, 워크플로 파일 `publish.yml`, environment `npm`을
+   등록합니다. 패키지가 아직 없어 등록할 수 없으면, 첫 버전만 관리자가 2단계 인증으로 직접 게시한 뒤 등록합니다.
+3. 등록 후에는 토큰 게시를 막도록 패키지의 publishing access를 trusted publishing 전용으로 바꿉니다.
+
+검증 범위: 워크플로는 아직 실제로 게시해 보지 않았습니다❓.

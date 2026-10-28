@@ -10,12 +10,16 @@ import { McpClient, McpToolError } from './mcp-client.ts';
 import { readRoomSmokeAccess } from './smoke-read-scope.ts';
 import { runChatShell } from './chat-shell.ts';
 import { runTerminalMessenger } from './terminal-messenger.ts';
+import { proxyUserConnection } from './user-connection.ts';
 
 // ----------------------------------------------------------------------------
-// KakaoTalk headless CLI — a thin client over the MCP daemon (see mcp-client.ts)
+// Command CLI over agent MCP; human chat reads use the private owner interface (see mcp-client.ts)
 // ----------------------------------------------------------------------------
 
-const { mcpPort: MCP_PORT, mcpHost: MCP_HOST } = loadConfig();
+// The privileged stdio proxy only needs its explicit socket argument, never account settings.
+const config = process.argv[2] === 'user-connect' ? undefined : loadConfig();
+const MCP_HOST = config?.mcpHost ?? '127.0.0.1', MCP_PORT = config?.mcpPort ?? 8787;
+const DATA_DIR = config?.dataDir ?? '', USER_SOCKET = config?.userSocket, USER_COMMAND = config?.userCommand;
 
 // ANSI color helpers
 const c = {
@@ -581,8 +585,12 @@ async function main() {
   const option = (name: string) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1]; };
 
   switch (cmd) {
+    case 'user-connect':
+      if (!option('--socket')) throw new Error('Usage: kakao user-connect --socket <private owner socket>');
+      await proxyUserConnection(option('--socket')!);
+      break;
     case 'chat':
-      await runTerminalMessenger(args, { host: MCP_HOST, port: MCP_PORT });
+      await runTerminalMessenger(args, { host: MCP_HOST, port: MCP_PORT, dataDir: DATA_DIR, userSocket: USER_SOCKET, userCommand: USER_COMMAND });
       break;
     case 'shell':
       await runChatShell(args, { host: MCP_HOST, port: MCP_PORT });

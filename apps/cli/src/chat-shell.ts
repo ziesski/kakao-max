@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { stripVTControlCharacters } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { McpClient, McpToolError, type ElicitationReply } from './mcp-client.ts';
 import { sendMessage } from './agent-send-client.ts';
@@ -10,12 +9,8 @@ interface History { messages: Message[]; sync?: { error?: unknown; status?: numb
 export interface ShellClient { callTool<T = any>(name: string, args?: Record<string, unknown>): Promise<T>; }
 export interface ShellOptions { demo?: boolean; showRoom?: string; }
 
-/** Titles, names and messages are data, never terminal escape sequences or commands. */
-export function shellText(value: unknown): string {
-  return stripVTControlCharacters(String(value ?? ''))
-    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200c\u200e\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
-      c => c === '\n' || c === '\r' ? ' ↵ ' : `⟦${c.codePointAt(0)!.toString(16)}⟧`);
-}
+export { terminalText as shellText } from './terminal-text.ts';
+import { terminalText as shellText } from './terminal-text.ts';
 const normalize = (s: string) => s.normalize('NFKC').toLocaleLowerCase();
 const unquote = (s: string) => /^(["']).*\1$/s.test(s) ? s.slice(1, -1) : s;
 class ShellInputError extends Error {}

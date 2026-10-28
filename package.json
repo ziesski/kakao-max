@@ -47,7 +47,7 @@
     "web": "node --experimental-strip-types apps/web/src/index.ts",
     "presetup": "npm run build --workspace=@kakao-max/protocol",
     "setup": "node --experimental-strip-types apps/mcp/src/setup.ts",
-    "typecheck": "npm run build --workspace=@kakao-max/protocol && tsc -p packages/core/tsconfig.json && tsc -p apps/mcp/tsconfig.json && tsc -p apps/cli/tsconfig.json && tsc -p apps/web/tsconfig.json",
+    "typecheck": "npm run build --workspace=@kakao-max/protocol && tsc -p packages/core/tsconfig.json && tsc -p apps/mcp/tsconfig.json && tsc -p packages/client/tsconfig.json && tsc -p apps/cli/tsconfig.json && tsc -p apps/web/tsconfig.json",
     "prepare": "node -e \"try{require('node:child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\"",
     "prepack": "npm run build:package"
   },

@@ -1,5 +1,11 @@
 import { emitKeypressEvents, type Key } from 'node:readline';
-import { ChatShell, shellText, type ShellOptions, type ShellClient } from './chat-shell.ts';
+import { terminalText as shellText, type DisplayOptions } from './terminal-text.ts';
+import { Conversation, UserReadClient, type UserReader, type WriteResult, type MessageWriter } from '@kakao-max/client';
+import { ConversationView } from './conversation-view.ts';
+import { conversationError } from './conversation-errors.ts';
+import { userEndpoint } from './user-connection.ts';
+import { sendMessage } from './agent-send-client.ts';
+import { McpToolError } from './mcp-client.ts';
 import { McpClient, type ElicitationReply } from './mcp-client.ts';
 
 const segmenter = new Intl.Segmenter('ko', { granularity: 'grapheme' });
@@ -32,10 +38,11 @@ interface Approval {
   resolve: (value: ElicitationReply) => void;
 }
 
-/** A small human-facing view over the same MCP operations used by the command CLI. */
+/** Keyboard and terminal rendering only; the shared conversation owns account-independent state. */
 export class TerminalMessenger {
-  readonly shell: ChatShell;
-  readonly options: ShellOptions;
+  readonly conversation: Conversation;
+  private readonly presentation: ConversationView;
+  readonly options: DisplayOptions;
   focus: 'rooms' | 'chat' = 'rooms';
   search: Field = { text: '', cursor: 0 };
   draft: Field = { text: '', cursor: 0 };
@@ -45,46 +52,35 @@ export class TerminalMessenger {
   busy = false;
   polling = true;
   closed = false;
-  private transcript: string[] = [];
   private approval?: Approval;
   private paste?: string;
   private sending = false;
   private revision = 0;
-  private readOnce = false;
   private readonly redraw: () => void;
 
-  constructor(client: ShellClient, options: ShellOptions, redraw: () => void) {
-    this.options = options; this.redraw = redraw;
-    this.shell = new ChatShell(client, (line, kind) => {
-      if (kind === 'message') {
-        this.revision++;
-        this.transcript.push(line);
-        if (this.scroll > 0) this.scroll++;
-        if (this.transcript.length > 500) this.transcript.shift();
-      } else if (line.startsWith('오류:') || line.startsWith('✓')) this.status = line;
-    }, options);
+  constructor(reader: UserReader, writer: MessageWriter, options: DisplayOptions, redraw: () => void) {
+    this.options = options; this.redraw = redraw; this.presentation = new ConversationView(options);
+    this.conversation = new Conversation(reader, writer, () => { this.revision++; }, room => this.presentation.canOpen(room));
   }
-
-  get filtered() { return this.shell.choices.filter(r => r.label.normalize('NFKC').toLocaleLowerCase().includes(this.search.text.normalize('NFKC').toLocaleLowerCase())); }
+  get filtered() {
+    return this.conversation.rooms.map(r => ({ id: r.id, label: this.presentation.label(r), unread: r.unreadCount, openable: this.presentation.canOpen(r) }))
+      .filter(r => r.label.normalize('NFKC').toLocaleLowerCase().includes(this.search.text.normalize('NFKC').toLocaleLowerCase()));
+  }
+  private get currentTitle(): string | undefined { return this.conversation.active && this.presentation.label(this.conversation.active); }
   async start(): Promise<void> {
-    await this.work(async () => { await this.shell.start(); this.status = '방 이름을 검색하거나 방향키로 선택하세요.'; });
-  }
-  private error(e: unknown): string {
-    if (this.options.demo) return '오류: ' + shellText((e as { code?: string })?.code || '요청 처리 실패') + ' · 촬영 전에 일반 모드에서 확인하세요.';
-    return '오류: ' + shellText((e as Error).message);
+    await this.work(async () => { await this.conversation.start(); this.presentation.update(this.conversation.rooms); this.status = '방 이름을 검색하거나 방향키로 선택하세요.'; });
   }
   private async work(job: () => Promise<void>, quiet = false): Promise<void> {
     if (this.busy || this.closed) return;
     const before = this.revision, previousStatus = this.status;
     this.busy = true; if (!quiet) this.redraw();
-    try { await job(); } catch (e) { this.status = this.error(e); this.polling = false; }
+    try { await job(); } catch (e) { this.status = conversationError(e, this.options.demo); this.polling = false; }
     finally { this.busy = false; if (!this.closed && (!quiet || before !== this.revision || previousStatus !== this.status)) this.redraw(); }
   }
   async poll(): Promise<void> {
-    if (!this.shell.currentTitle || !this.polling) return;
+    if (!this.currentTitle || !this.polling) return;
     await this.work(async () => {
-      await this.shell.receive();
-      if (this.readOnce) { this.polling = false; this.status = '이번 조회만 허용했습니다. Ctrl+R로 다시 조회할 수 있습니다.'; }
+      await this.conversation.poll();
     }, true);
   }
 
@@ -96,7 +92,7 @@ export class TerminalMessenger {
     });
   }
   close(): void {
-    this.closed = true;
+    this.closed = true; this.conversation.close();
     this.approval?.resolve({ action: 'cancel' }); this.approval = undefined;
     this.draft = { text: '', cursor: 0 }; this.paste = undefined;
   }
@@ -122,7 +118,6 @@ export class TerminalMessenger {
           a.code = a.text.trim(); a.text = ''; a.phase = 'remember';
         } else {
           this.approval = undefined;
-          if (a.phase === 'remember' && String(a.params.requestedSchema.properties.remember?.title).includes('읽기') && a.text.toLowerCase() !== 'y') this.readOnce = true;
           a.resolve(a.phase === 'code' && !a.text.trim() ? { action: 'decline' } : { action: 'accept', content: {
             code: a.code ?? a.text.trim(), remember: a.phase === 'remember' && a.text.toLowerCase() === 'y'
           } });
@@ -131,15 +126,15 @@ export class TerminalMessenger {
       this.redraw(); return;
     }
     if (key.name === 'escape' || key.name === 'tab') {
-      if (!this.busy) this.focus = this.focus === 'chat' || key.name === 'escape' ? 'rooms' : this.shell.currentTitle ? 'chat' : 'rooms';
+      if (!this.busy) this.focus = this.focus === 'chat' || key.name === 'escape' ? 'rooms' : this.currentTitle ? 'chat' : 'rooms';
     } else if (key.ctrl && key.name === 'r') {
       await this.work(async () => {
-        this.status = '새로고침 중…'; this.readOnce = false;
-        if (this.shell.currentTitle) { this.transcript = []; await this.shell.execute('history 30'); }
-        else await this.shell.execute('ls');
-        this.polling = !this.status.startsWith('오류:') && !this.readOnce;
+        this.status = '새로고침 중…';
+        if (!this.conversation.connected) await this.conversation.start();
+        else await this.conversation.refresh();
+        this.presentation.update(this.conversation.rooms);
+        this.polling = !this.status.startsWith('오류:');
         if (this.polling) this.status = '연결됨 · 새 메시지는 약 2초마다 확인합니다.';
-        else if (this.readOnce) this.status = '이번 조회만 허용했습니다. Ctrl+R로 다시 조회할 수 있습니다.';
       });
     } else if (this.focus === 'rooms' && (key.name === 'up' || key.name === 'down')) {
       this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + (key.name === 'up' ? -1 : 1)));
@@ -152,9 +147,9 @@ export class TerminalMessenger {
         if (!room) return;
         if (!room.openable) { this.status = '촬영 모드에서는 공개 대상으로 지정한 방만 열 수 있습니다.'; this.redraw(); return; }
         await this.work(async () => {
-          this.transcript = []; this.scroll = 0; this.draft = { text: '', cursor: 0 }; this.status = '대화 불러오는 중…'; this.readOnce = false;
-          await this.shell.execute(`cd ${room.index}`);
-          if (this.shell.currentTitle) { this.focus = 'chat'; this.polling = !this.readOnce; this.status = this.readOnce ? '이번 조회만 허용했습니다. Ctrl+R로 다시 조회할 수 있습니다.' : '연결됨 · 새 메시지는 약 2초마다 확인합니다.'; }
+          this.scroll = 0; this.draft = { text: '', cursor: 0 }; this.status = '대화 불러오는 중…';
+          await this.conversation.open(room.id);
+          if (this.currentTitle) { this.focus = 'chat'; this.polling = true; this.status = '연결됨 · 새 메시지는 약 2초마다 확인합니다.'; }
         });
       } else if (this.draft.text.trim()) {
         const sent = this.draft.text;
@@ -162,7 +157,8 @@ export class TerminalMessenger {
           this.status = '전송 중…';
           this.sending = true;
           try {
-            await this.shell.execute('/send ' + sent);
+            await this.conversation.send(sent);
+            this.status = '✓ 전송 요청 처리 완료 · 실제 도착은 카톡에서도 확인하세요.';
             if (this.status.startsWith('✓')) { this.draft = { text: '', cursor: 0 }; this.scroll = 0; }
           } finally { this.sending = false; }
         });
@@ -198,7 +194,7 @@ export class TerminalMessenger {
     if (width < 70 || height < 14) return '\x1b[H\x1b[2J' + fit('터미널을 넓혀 주세요 (72칸 × 14줄 이상). Ctrl+C 종료', width);
     const lines: string[] = [];
     const add = (s: string) => lines.push(fit(s, width));
-    add('kakao-max  |  터미널 메신저' + (this.options.demo ? '  ·  촬영 모드' : ''));
+    add('kakao-max  |  터미널 메신저 · 읽음 표시 안 보냄' + (this.options.demo ? '  ·  촬영 모드' : ''));
     add(this.busy ? '처리 중…  ·  작성 중인 내용은 유지됩니다.' : this.status);
     add('─'.repeat(width));
     if (this.approval) {
@@ -215,14 +211,14 @@ export class TerminalMessenger {
       const bodyHeight = height - 7;
       const visible = this.filtered;
       const start = Math.max(0, this.selected - bodyHeight + 2);
-      const messages = this.transcript.flatMap(s => wrap(s, rightWidth));
+      const messages = this.conversation.messages.flatMap(m => wrap(this.presentation.message(m, this.conversation.userId), rightWidth));
       this.scroll = Math.min(this.scroll, Math.max(0, messages.length - bodyHeight + 1));
       const end = Math.max(0, messages.length - this.scroll);
       const view = messages.slice(Math.max(0, end - bodyHeight + 1), end);
       for (let i = 0; i < bodyHeight; i++) {
         const room = visible[start + i - 1];
         const left = i === 0 ? '대화방 · 검색해서 선택' : room ? `${start + i - 1 === this.selected ? '› ' : '  '}${room.label}${room.unread ? ` (${room.unread})` : ''}` : '';
-        const right = i === 0 ? this.shell.currentTitle ?? '방을 선택하면 최근 대화가 표시됩니다.' : view[i - 1] ?? '';
+        const right = i === 0 ? this.currentTitle ?? '방을 선택하면 최근 대화가 표시됩니다.' : view[i - 1] ?? '';
         const row = fit(left, leftWidth) + ' │ ' + fit(right, rightWidth);
         lines.push(i > 0 && room && start + i - 1 === this.selected && this.focus === 'rooms' ? '\x1b[7m' + row + '\x1b[0m' : row);
       }
@@ -239,11 +235,12 @@ export class TerminalMessenger {
   }
 }
 
-export async function runTerminalMessenger(args: string[], endpoint: { host: string; port: number }): Promise<void> {
-  let demo = false, showRoom: string | undefined;
+export async function runTerminalMessenger(args: string[], endpoint: { host: string; port: number; dataDir: string; userSocket?: string; userCommand?: readonly string[] }): Promise<void> {
+  let demo = false, showRoom: string | undefined, socketPath: string | undefined;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--demo') demo = true;
     else if (args[i] === '--show-room' && args[i + 1] && !args[i + 1].startsWith('--')) showRoom = args[++i];
+    else if (args[i] === '--user-socket' && args[i + 1]) socketPath = args[++i];
     else throw new Error('사용법: kakao chat [--demo --show-room "공개할 방"]');
   }
   if (showRoom && !demo) throw new Error('--show-room은 --demo와 함께 사용하세요.');
@@ -252,10 +249,15 @@ export async function runTerminalMessenger(args: string[], endpoint: { host: str
   const render = () => { if (view && !view.closed) process.stdout.write(view.render(process.stdout.columns || 100, process.stdout.rows || 24)); };
   const client = new McpClient({ ...endpoint, timeoutMs: 150000,
     ...(!demo ? { onElicitation: (params: Record<string, any>) => view.askApproval(params) } : {}) });
-  view = new TerminalMessenger(client, { demo, showRoom }, render);
+  const reader = new UserReadClient(userEndpoint(endpoint.dataDir, socketPath ?? endpoint.userSocket, endpoint.userCommand));
+  view = new TerminalMessenger(reader, { identity: () => client.callTool('get_status'), send: async (chatId, text, requestId) => {
+    try { const result = await sendMessage(client, { chatId, text }, requestId); return { ok: true, messageId: result.logId! }; }
+    catch (e) { return { ok: false, code: (e as any).code || 'SEND_OUTCOME_UNKNOWN', message: (e as Error).message,
+      uncertain: !(e instanceof McpToolError) }; }
+  } }, { demo, showRoom }, render);
   let done!: () => void;
   const exit = new Promise<void>(resolve => { done = resolve; });
-  const stop = () => { view.close(); client.close(); done(); };
+  const stop = () => { view.close(); reader.close(); client.close(); done(); };
   const onKey = (text: string, key: Key) => {
     if (key.ctrl && key.name === 'c') { stop(); return; }
     void view.key(text, key).catch(() => { view.status = '입력을 처리하지 못했습니다.'; render(); });
@@ -268,17 +270,18 @@ export async function runTerminalMessenger(args: string[], endpoint: { host: str
   process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?2004h');
   let timer: ReturnType<typeof setInterval> | undefined;
   try {
-    render(); await client.connect(); await view.start();
+    render(); await reader.connect(); await client.connect(); await view.start();
     timer = setInterval(() => { void view.poll(); }, 2000);
     if (!view.closed) await exit;
   } catch (e) {
-    throw new Error(demo ? '촬영 모드 연결 실패. 촬영 전에 연결 상태를 확인하세요.' : shellText((e as Error).message));
+    throw new Error(conversationError(e, demo));
   } finally {
     if (timer) clearInterval(timer);
-    view.close(); client.close();
+    view.close(); reader.close(); client.close();
     process.stdin.off('keypress', onKey); process.stdout.off('resize', render);
     process.off('SIGTERM', stop); process.off('SIGHUP', stop);
     process.stdin.setRawMode(wasRaw); process.stdin.pause();
     process.stdout.write('\x1b[?2004l\x1b[?25h\x1b[?1049l');
+    if (view.conversation.pending) console.error(`전송 결과 확인 필요 · 요청 ID ${view.conversation.pending.requestId}. 카카오톡을 먼저 확인하고 새 요청으로 다시 보내지 마세요.`);
   }
 }

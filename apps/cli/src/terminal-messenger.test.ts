@@ -3,32 +3,33 @@ import assert from 'node:assert/strict';
 import { stripVTControlCharacters } from 'node:util';
 import { TerminalMessenger, terminalWidth } from './terminal-messenger.ts';
 import { McpToolError } from './mcp-client.ts';
-import type { ShellClient } from './chat-shell.ts';
+import type { UserReader, MessageWriter } from '@kakao-max/client';
 
 function fixture(demo = true) {
   const calls: { name: string; args: Record<string, any> }[] = [];
   let events: any[] = [], receiveError: Error | undefined, sendError: Error | undefined;
-  const client: ShellClient = { async callTool(name, args = {}) {
-    calls.push({ name, args });
-    if (name === 'get_status') return { connected: true, userId: '1' } as any;
-    if (name === 'list_chats') return { chats: [
+  const reader: UserReader = {
+    async status() { calls.push({ name: 'status', args: {} }); return { connected: true, userId: '1' }; },
+    async rooms() { calls.push({ name: 'rooms', args: {} }); return [
       { id: '101', title: 'PRIVATE NAME', unreadCount: 4 },
-      { id: '202', title: '공개 테스트방', unreadCount: 0 }
-    ] } as any;
-    if (name === 'read_messages') {
-      if (args.mode === 'recent') {
-        if (receiveError) throw receiveError;
-        return { messages: events.filter(e => e.seq > Number(args.sinceSeq)), cursor: events.at(-1)?.seq ?? args.sinceSeq } as any;
-      }
-      return { messages: [{ messageId: '20', authorId: '2', authorName: 'PRIVATE AUTHOR', text: 'fixture history', sendAt: 1000 }] } as any;
+      { id: '202', title: '공개 테스트방', unreadCount: 3 }
+    ]; },
+    async history(chatId) {
+      calls.push({ name: 'history', args: { chatId } });
+      return { messages: [{ messageId: '20', authorId: '2', authorName: 'PRIVATE AUTHOR', text: 'fixture history', sendAt: 1000 }], hasMore: false };
+    },
+    async updates(chatId, after, visibleIds) {
+      calls.push({ name: 'updates', args: { chatId, after, visibleIds } });
+      if (receiveError) throw receiveError;
+      return { messages: events.filter(e => BigInt(e.messageId) > BigInt(after)), reset: false, removedIds: [] };
     }
-    if (name === 'send_message') {
-      if (sendError) throw sendError;
-      return { status: 0, state: 'sent_unverified', requestId: args.requestId, logId: '40' } as any;
-    }
-    throw new Error('unexpected tool');
+  };
+  const writer: MessageWriter = { async identity() { return { connected: true, userId: '1' }; }, async send(chatId, text, requestId) {
+    calls.push({ name: 'send_message', args: { chatId, text, requestId } });
+    if (sendError) throw sendError;
+    return { ok: true, messageId: '40' };
   } };
-  const view = new TerminalMessenger(client, demo ? { demo, showRoom: '공개 테스트방' } : {}, () => {});
+  const view = new TerminalMessenger(reader, writer, demo ? { demo, showRoom: '공개 테스트방' } : {}, () => {});
   return { view, calls, setEvents: (e: any[]) => { events = e; },
     receiveError: (e?: Error) => { receiveError = e; }, sendError: (e: Error) => { sendError = e; } };
 }
@@ -42,10 +43,10 @@ test('searchable room picker hides private labels and blocks opening private roo
   const f = fixture(); await f.view.start();
   assert.ok(!display(f.view).includes('PRIVATE NAME'));
   await f.view.key('', { name: 'return' });
-  assert.equal(f.calls.filter(c => c.name === 'read_messages').length, 0);
+  assert.equal(f.calls.filter(c => c.name === 'history').length, 0);
   await f.view.key('공개'); await f.view.key('', { name: 'return' });
-  assert.equal(f.view.shell.currentTitle, '공개 테스트방');
-  assert.deepEqual(f.calls.find(c => c.name === 'read_messages')?.args, { chatId: '202', limit: 30 });
+  assert.equal(f.view.conversation.active?.title, '공개 테스트방');
+  assert.deepEqual(f.calls.find(c => c.name === 'history')?.args, { chatId: '202' });
   assert.ok(display(f.view).includes('fixture history'));
   assert.ok(!display(f.view).includes('PRIVATE AUTHOR'));
 });
@@ -61,8 +62,8 @@ test('receiving selected-room messages preserves input, aliases authors and dedu
   assert.equal(display(f.view).match(/fixture incoming/g)?.length, 1);
   assert.equal(display(f.view).match(/fixture history/g)?.length, 1);
   assert.ok(!display(f.view).includes('PRIVATE AUTHOR'));
-  const reads = f.calls.filter(c => c.name === 'read_messages' && c.args.mode === 'recent');
-  assert.deepEqual(reads.map(c => c.args.sinceSeq), [0, 2]);
+  const reads = f.calls.filter(c => c.name === 'updates');
+  assert.deepEqual(reads.map(c => c.args.after), ['20', '30']);
   assert.ok(reads.every(c => c.args.chatId === '202'));
   assert.equal(f.calls.filter(c => c.name === 'mark_read').length, 0);
 });
@@ -132,22 +133,10 @@ test('demo mode never exposes an approval form', async () => {
   assert.ok(!display(f.view).includes('secret-account-value'));
 });
 
-test('one-time read approval does not turn into repeated background approval prompts', async () => {
-  let view: TerminalMessenger, reads = 0;
-  const client: ShellClient = { async callTool(name) {
-    if (name === 'get_status') return { connected: true } as any;
-    if (name === 'list_chats') return { chats: [{ id: '101', title: 'fixture room' }] } as any;
-    reads++;
-    await view.askApproval({ message: 'fixture one-time read', requestedSchema: { properties: {
-      code: { type: 'string' }, remember: { title: '이 방은 앞으로 묻지 않고 읽기' }
-    } } });
-    return { messages: [] } as any;
-  } };
-  view = new TerminalMessenger(client, {}, () => {});
-  await view.start();
-  const opening = view.key('', { name: 'return' });
-  await new Promise<void>(resolve => setImmediate(resolve));
-  await view.key('TEST'); await view.key('', { name: 'return' }); await view.key('', { name: 'return' });
-  await opening; assert.equal(view.polling, false);
-  await view.poll(); assert.equal(reads, 1);
+test('human room opening and updates do not request an agent read grant or require unread zero', async () => {
+  const f = fixture(false); await open(f); await f.view.poll();
+  assert.ok(f.calls.some(c => c.name === 'history'));
+  assert.ok(f.calls.some(c => c.name === 'updates'));
+  assert.ok(!f.calls.some(c => ['request_permission', 'mark_read', 'read_messages'].includes(c.name)));
+  assert.equal(f.view.polling, true);
 });

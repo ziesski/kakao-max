@@ -8,6 +8,9 @@
 // ----------------------------------------------------------------------------
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { UserReadService } from '@kakao-max/core';
+import { startUserReadServer } from './user-read-server.ts';
 import { McpStdioServer } from './mcp-stdio.ts';
 import { KakaoSession, SendPolicy, AgentSendService, AgentPublicationService, AgentMutationService, AgentOperationEngine, AGENT_CONTROL_DEFINITIONS, AgentSendJournal, ApprovalStore, ApproverRegistry, RecipientPermissions, DailyActionLimit, approvalWindowFromConfig, loadConfig, loadPolicyConfig, KakaoError, toKakaoError, agentModeApproves, MCP_TOOL_GROUPS } from '@kakao-max/core';
 import { serveSocket, parseListenSpec, validateListenSpec } from './socket-transport.ts';
@@ -66,12 +69,14 @@ registerMessageInboxTools(server, kakao);
 registerVaultTools(server, kakao);
 
 let socketServer: ReturnType<typeof serveSocket> | undefined;
+let userReadServer: Awaited<ReturnType<typeof startUserReadServer>> | undefined;
 
 async function main() {
   // Reject unsafe transport configuration before opening the sole live session.
   const listen = loadConfig().mcpListen;
   const spec = listen ? parseListenSpec(listen) : undefined;
   if (spec) validateListenSpec(spec);
+  if (spec?.path && path.resolve(spec.path) === path.join(kakao.config.dataDir, 'user.sock')) throw new KakaoError('CONFIG_INVALID', 'Agent and owner sockets must be distinct');
   agentJournal = AgentSendJournal.open(kakao.config.dataDir);
   const registry = new ApproverRegistry(kakao.config.dataDir);
   const approvals = new ApprovalStore(agentJournal, registry, Date.now, { clientConfirmations: kakao.config.approval.clientConfirm });
@@ -119,6 +124,9 @@ async function main() {
   } else setApprovalCenter(undefined, approvals);
   process.stderr.write('[mcp] connecting live KakaoTalk session...\n');
   await kakao.start();
+  if (spec && process.platform !== 'win32') {
+    userReadServer = await startUserReadServer(new UserReadService(kakao), path.join(kakao.config.dataDir, 'user.sock'));
+  }
 
   // Always-on daemon mode: when KAKAO_MCP_LISTEN is set we hold the warm LOCO session
   // and serve MCP over a socket (the personal-agent runtime / Claude Code connect over
@@ -140,6 +148,7 @@ async function main() {
 }
 
 function shutdown(): void {
+  userReadServer?.close();
   socketServer?.close();
   approvalServer?.close();
   approvalCenter?.close();

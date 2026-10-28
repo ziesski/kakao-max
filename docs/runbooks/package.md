@@ -60,7 +60,8 @@ npm trusted publishing(OIDC)을 쓰므로 저장소에 npm 토큰을 두지 않�
 - 워크플로는 태그와 버전이 다르거나 태그 커밋이 `main`에 없으면 멈춥니다. 게시 전에 typecheck, 테스트,
   `check:publication`, `check:package`를 다시 실행합니다.
 - 작업은 GitHub `npm` environment에서 실행됩니다. 이 environment에 필수 검토자를 두면 사람이 승인해야 게시됩니다.
-- 태그 없이 수동 실행하면 `npm publish --dry-run`만 하고 게시하지 않습니다.
+- 태그 없이 수동 실행하면 `npm publish --dry-run`만 하고 게시하지 않습니다. npm은 이미 게시한 버전의 dry run도
+  거부하므로, 실행기 안에서만 임시 prerelease 버전(`<버전>-dryrun.<실행 ID>`)으로 바꿔 점검합니다.
 - 게시한 버전은 덮어쓸 수 없습니다. 문제가 있으면 새 버전을 게시하고, 필요하면 `npm deprecate`로 표시합니다.
 
 처음 한 번은 관리자가 직접 준비합니다. 게시 계정은 실명이 아닌 프로젝트 계정을 씁니다.

@@ -53,6 +53,12 @@ jobs:
       - name: Publish
         if: github.ref_type == 'tag'
         run: npm publish --access public
+      # npm refuses even a dry run of a version it already has, so a manual run between releases checks a
+      # throwaway prerelease version. The change stays in the runner and is never committed or published.
       - name: Dry run
         if: github.ref_type != 'tag'
-        run: npm publish --access public --dry-run
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          npm version --no-git-tag-version "$(node -p "require('./package.json').version")-dryrun.$RUN_ID"
+          npm publish --access public --tag dryrun --dry-run

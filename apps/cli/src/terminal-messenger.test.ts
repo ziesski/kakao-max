@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { stripVTControlCharacters } from 'node:util';
 import { TerminalMessenger, terminalWidth } from './terminal-messenger.ts';
 import { McpToolError } from './mcp-client.ts';
-import type { UserReader, MessageWriter } from '@kakao-max/client';
+import type { ConversationReader, MessageWriter } from '@kakao-max/client';
 
 function fixture(demo = true) {
   const calls: { name: string; args: Record<string, any> }[] = [];
   let events: any[] = [], receiveError: Error | undefined, sendError: Error | undefined;
-  const reader: UserReader = {
-    async status() { calls.push({ name: 'status', args: {} }); return { connected: true, userId: '1' }; },
+  const reader: ConversationReader = {
+    async status() { calls.push({ name: 'status', args: {} }); return { connected: true, userId: '1', mode: 'ask' }; },
     async rooms() { calls.push({ name: 'rooms', args: {} }); return [
       { id: '101', title: 'PRIVATE NAME', unreadCount: 4 },
       { id: '202', title: '공개 테스트방', unreadCount: 3 }
@@ -30,7 +30,7 @@ function fixture(demo = true) {
     return { ok: true, messageId: '40' };
   } };
   const view = new TerminalMessenger(reader, writer, demo ? { demo, showRoom: '공개 테스트방' } : {}, () => {});
-  return { view, calls, setEvents: (e: any[]) => { events = e; },
+  return { view, reader, calls, setEvents: (e: any[]) => { events = e; },
     receiveError: (e?: Error) => { receiveError = e; }, sendError: (e: Error) => { sendError = e; } };
 }
 async function open(f: ReturnType<typeof fixture>) {
@@ -139,4 +139,29 @@ test('human room opening and updates do not request an agent read grant or requi
   assert.ok(f.calls.some(c => c.name === 'updates'));
   assert.ok(!f.calls.some(c => ['request_permission', 'mark_read', 'read_messages'].includes(c.name)));
   assert.equal(f.view.polling, true);
+});
+
+
+test('one-time read approval pauses polling instead of repeatedly asking', async () => {
+  const f = fixture(false);
+  await f.view.start();
+  const history = f.reader.history.bind(f.reader);
+  f.reader.history = async chatId => {
+    await f.view.askApproval({ mode: 'form', requestedSchema: { properties: { code: { type: 'string' }, remember: { type: 'boolean', title: '앞으로 읽기' } } } });
+    return history(chatId);
+  };
+  await f.view.key('공개 테스트방');
+  const opening = f.view.key('', { name: 'return' });
+  await f.view.key('fixture-code'); await f.view.key('', { name: 'return' });
+  await f.view.key('', { name: 'return' }); await opening;
+  assert.equal(f.view.focus, 'chat'); assert.equal(f.view.polling, false);
+  await f.view.poll(); assert.equal(f.calls.filter(c => c.name === 'updates').length, 0);
+  assert.ok(display(f.view).includes('모드: ask'));
+});
+
+test('unread policy errors explain the shared ask restriction', async () => {
+  const f = fixture(); await open(f);
+  f.receiveError(new McpToolError('read_messages', 'fixture', 'ROOM_NOT_READ'));
+  await f.view.poll();
+  assert.ok(display(f.view).includes('ask 모드')); assert.equal(f.view.polling, false);
 });

@@ -42,9 +42,6 @@ export interface KakaoConfig {
   /** CLI daemon endpoint (MCP_HOST / MCP_PORT). */
   mcpHost: string;
   mcpPort: number;
-  /** Private owner read transport, separate from agent MCP. */
-  userSocket?: string;
-  userCommand?: readonly string[];
   /** Optional local MCP socket; absent means stdio. */
   mcpListen?: string;
   /** OS users (besides the daemon's own and root) whose loopback TCP connections are served (KAKAO_MCP_ALLOWED_UIDS). */
@@ -253,17 +250,6 @@ export function loadConfig(opts: { envPath?: string; env?: Record<string, string
   if (/[/\\\s?#@]/.test(mcpHost)) throw new KakaoError('CONFIG_INVALID', 'MCP_HOST must be a hostname or IP address');
   const mcpPort = Number(pick('MCP_PORT') ?? 8787);
   if (!Number.isSafeInteger(mcpPort) || mcpPort < 1 || mcpPort > 65535) throw new KakaoError('CONFIG_INVALID', 'MCP_PORT must be a whole number from 1 to 65535');
-  const userSocket = pick('KAKAO_USER_SOCKET')?.trim() || undefined;
-  const userCommandRaw = pick('KAKAO_USER_COMMAND');
-  let userCommand: string[] | undefined;
-  if (userCommandRaw !== undefined) {
-    try {
-      const command = JSON.parse(userCommandRaw);
-      if (userCommandRaw.length > 16384 || !Array.isArray(command) || !command.length || command.length > 64 || command.some(v => typeof v !== 'string' || !v || /[\0\r\n]/.test(v))) throw new Error();
-      userCommand = command;
-    } catch { throw new KakaoError('CONFIG_INVALID', 'KAKAO_USER_COMMAND must be a bounded JSON argv array'); }
-  }
-  if (userSocket && userCommand) throw new KakaoError('CONFIG_INVALID', 'Choose KAKAO_USER_SOCKET or KAKAO_USER_COMMAND');
   const agentMode = parseAgentMode(pick('KAKAO_AGENT_MODE'));
   const vaultAutoSave = TRUTHY.has((pick('KAKAO_VAULT_AUTO_SAVE') ?? '').toLowerCase());
   // Daemon feature flags that archive content are a trust-mode choice (design §4).
@@ -282,7 +268,7 @@ export function loadConfig(opts: { envPath?: string; env?: Record<string, string
       rateLimit: { windowMs: Math.max(1, count('KAKAO_RATE_WINDOW_SEC', 60)) * 1000,
         perChat: count('KAKAO_RATE_PER_CHAT', 5), global: count('KAKAO_RATE_GLOBAL', 15) }
     },
-    healthTimeoutMs, mcpHost, mcpPort, userSocket, userCommand,
+    healthTimeoutMs, mcpHost, mcpPort,
     mcpListen: pick('KAKAO_MCP_LISTEN')?.trim() || undefined,
     mcpAllowedUids: parseAllowedUids(pick('KAKAO_MCP_ALLOWED_UIDS')),
     mcpToolGroups: parseMcpToolGroups(pick('KAKAO_MCP_TOOL_GROUPS')),

@@ -9,6 +9,7 @@ import { runAgentFileCommand, readAgentRequest } from './agent-send-files.ts';
 import { McpClient, McpToolError } from './mcp-client.ts';
 import { readRoomSmokeAccess } from './smoke-read-scope.ts';
 import { runChatShell } from './chat-shell.ts';
+import { runTerminalMessenger } from './terminal-messenger.ts';
 
 // ----------------------------------------------------------------------------
 // KakaoTalk headless CLI — a thin client over the MCP daemon (see mcp-client.ts)
@@ -527,6 +528,7 @@ ${c.bold}KakaoTalk Native Terminal CLI${c.reset}
 카카오톡을 리눅스/macOS 터미널에서 제어하는 커맨드라인 도구입니다.
 
 ${c.bold}사용 가능한 명령어:${c.reset}
+  ${c.cyan}kakao chat${c.reset}                             방 검색·방향키·입력창으로 쓰는 터미널 메신저
   ${c.cyan}kakao shell${c.reset}                            ls/cd/Tab으로 방을 고르고 대화하기
   ${c.cyan}kakao shell --demo --show-room "공개할 방"${c.reset}  다른 방 이름을 숨기는 촬영 모드
   ${c.cyan}kakao ls${c.reset} (또는 ${c.cyan}list${c.reset})                       대화방 목록과 안읽은 메시지 확인
@@ -579,6 +581,9 @@ async function main() {
   const option = (name: string) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1]; };
 
   switch (cmd) {
+    case 'chat':
+      await runTerminalMessenger(args, { host: MCP_HOST, port: MCP_PORT });
+      break;
     case 'shell':
       await runChatShell(args, { host: MCP_HOST, port: MCP_PORT });
       break;

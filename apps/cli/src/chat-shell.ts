@@ -5,7 +5,7 @@ import { McpClient, McpToolError, type ElicitationReply } from './mcp-client.ts'
 import { sendMessage } from './agent-send-client.ts';
 
 interface Room { id: string; title?: string; type?: string; memberCount?: number; unreadCount?: number | null; }
-interface Message { type?: number; logId?: string; messageId?: string; authorId?: string; authorName?: string; text?: string; sendAt?: number; }
+interface Message { seq?: number; type?: number; logId?: string; messageId?: string; authorId?: string; authorName?: string; text?: string; sendAt?: number; }
 interface History { messages: Message[]; sync?: { error?: unknown; status?: number; }; }
 export interface ShellClient { callTool<T = any>(name: string, args?: Record<string, unknown>): Promise<T>; }
 export interface ShellOptions { demo?: boolean; showRoom?: string; }
@@ -13,7 +13,7 @@ export interface ShellOptions { demo?: boolean; showRoom?: string; }
 /** Titles, names and messages are data, never terminal escape sequences or commands. */
 export function shellText(value: unknown): string {
   return stripVTControlCharacters(String(value ?? ''))
-    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200c\u200e\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,
       c => c === '\n' || c === '\r' ? ' ↵ ' : `⟦${c.codePointAt(0)!.toString(16)}⟧`);
 }
 const normalize = (s: string) => s.normalize('NFKC').toLocaleLowerCase();
@@ -24,7 +24,7 @@ const HELP = 'ls [-al] 목록 · cd <방 이름/번호> 입장 · cd .. 돌아�
 
 export class ChatShell {
   private readonly client: ShellClient;
-  private readonly write: (line: string) => void;
+  private readonly write: (line: string, kind?: 'message') => void;
   private readonly options: ShellOptions;
   private rooms: Room[] = [];
   private readonly aliases = new Map<string, string>();
@@ -35,9 +35,11 @@ export class ChatShell {
   private oldest?: string;
   private readonly shownMessages = new Set<string>();
   private historyLimit = 30;
+  private recentCursor = 0;
+  private liveAfter = 0n;
   private pendingSend?: { chatId: string; text: string; requestId: string };
 
-  constructor(client: ShellClient, write: (line: string) => void, options: ShellOptions = {}) {
+  constructor(client: ShellClient, write: (line: string, kind?: 'message') => void, options: ShellOptions = {}) {
     this.client = client; this.write = write; this.options = options;
     if (options.demo && !options.showRoom?.trim()) throw new ShellInputError('촬영 모드에는 --show-room으로 공개할 방을 지정하세요.');
   }
@@ -54,6 +56,26 @@ export class ChatShell {
   }
 
   get prompt(): string { return this.current ? `kakao:/${this.label(this.current)} > ` : 'kakao:/ > '; }
+
+  get currentTitle(): string | undefined { return this.current && this.label(this.current); }
+  get choices(): { index: number; label: string; unread: number | null; openable: boolean }[] {
+    return this.rooms.map((r, i) => ({ index: i + 1, label: this.label(r), unread: r.unreadCount ?? null,
+      openable: !this.options.demo || r.id === this.publicRoomId }));
+  }
+
+  /** Poll only the selected room's authorized live feed, without a receipt or another account session. */
+  async receive(): Promise<void> {
+    if (!this.current) return;
+    const out = await this.client.callTool<{ messages: Message[]; cursor: number }>('read_messages', {
+      chatId: this.current.id, mode: 'recent', sinceSeq: this.recentCursor
+    });
+    for (const m of out.messages ?? []) {
+      const id = messageId(m);
+      if (this.shownMessages.has(id) || (/^\d+$/.test(id) && BigInt(id) <= this.liveAfter)) continue;
+      this.printMessage(m);
+    }
+    this.recentCursor = out.cursor;
+  }
 
   private label(room: Room): string {
     if (this.options.demo && room.id !== this.publicRoomId) return this.aliases.get(room.id)!;
@@ -111,7 +133,7 @@ export class ChatShell {
       }
       if (command === 'cd') {
         // A failed room switch must not leave the old recipient selected for the next typed line.
-        this.current = undefined; this.oldest = undefined; this.shownMessages.clear();
+        this.current = undefined; this.oldest = undefined; this.shownMessages.clear(); this.recentCursor = 0; this.liveAfter = 0n;
         if (!arg || arg === '..' || arg === '/') return true;
         await this.refresh();
         const query = unquote(arg);
@@ -149,7 +171,8 @@ export class ChatShell {
       const request = { chatId: this.current.id, text, requestId: randomUUID() };
       this.pendingSend = request;
       try {
-        await sendMessage(this.client, { chatId: request.chatId, text }, request.requestId);
+        const sent = await sendMessage(this.client, { chatId: request.chatId, text }, request.requestId);
+        this.printMessage({ messageId: sent.logId, authorId: this.userId, text, type: 1, sendAt: Date.now() / 1000 });
         this.pendingSend = undefined;
         this.write('✓ 전송 요청 처리 완료 · 실제 도착은 카톡에서도 확인하세요.');
       } catch (e) {
@@ -164,6 +187,17 @@ export class ChatShell {
     return true;
   }
 
+  private printMessage(m: Message): void {
+    const authorId = m.authorId ?? m.authorName ?? 'unknown';
+    const mine = m.authorId !== undefined && m.authorId === this.userId;
+    if (!mine && !this.authors.has(authorId)) this.authors.set(authorId, `참여자 ${this.authors.size + 1}`);
+    const author = mine ? '나' : this.options.demo ? this.authors.get(authorId)! : shellText(m.authorName || this.authors.get(authorId));
+    const time = Number.isFinite(m.sendAt) ? new Date(m.sendAt! * 1000).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
+    this.write(`${time}  ${author}  ${messageText(m)}`, 'message');
+    this.shownMessages.add(messageId(m));
+    while (this.shownMessages.size > 2000) this.shownMessages.delete(this.shownMessages.values().next().value!);
+  }
+
   private async history(room: Room, limit: number, older = false): Promise<void> {
     const out = await this.client.callTool<History>('read_messages', { chatId: room.id, limit, ...(older ? { beforeLogId: this.oldest } : {}) });
     if (out.sync?.error || (out.sync?.status !== undefined && ![0, -203].includes(out.sync.status))) throw new ShellInputError('대화 동기화가 완료되지 않았습니다. 다시 확인하세요.');
@@ -171,20 +205,13 @@ export class ChatShell {
     const messages = older ? all.filter(m => !this.shownMessages.has(messageId(m))) : all;
     if (!older) this.shownMessages.clear();
     this.write(`── ${this.label(room)} · ${older ? '이전' : '최근'} 대화 ${messages.length}개 ──`);
-    for (const m of messages) {
-      const authorId = m.authorId ?? m.authorName ?? 'unknown';
-      const mine = m.authorId !== undefined && m.authorId === this.userId;
-      if (!mine && !this.authors.has(authorId)) this.authors.set(authorId, `참여자 ${this.authors.size + 1}`);
-      const author = mine ? '나' : this.options.demo ? this.authors.get(authorId)! : shellText(m.authorName || this.authors.get(authorId));
-      const time = Number.isFinite(m.sendAt) ? new Date(m.sendAt! * 1000).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }) : '--:--';
-      this.write(`${time}  ${author}  ${messageText(m)}`);
-      this.shownMessages.add(messageId(m));
-    }
+    for (const m of messages) this.printMessage(m);
     // Provider upper bounds can be inclusive. Move below the oldest returned ID and deduplicate defensively.
     const ids = all.map(messageId).filter(id => /^[1-9]\d*$/.test(id)).map(BigInt);
     if (!older || messages.length) {
       this.oldest = ids.length ? (ids.reduce((a, b) => a < b ? a : b) - 1n).toString() : undefined;
     }
+    if (!older) this.liveAfter = ids.length ? ids.reduce((a, b) => a > b ? a : b) : 0n;
     this.historyLimit = limit;
     if (!messages.length) this.write('조회 가능한 대화가 없습니다.');
     this.write('이 기기에서 조회 가능한 기록입니다. 오래된 대화 전체가 포함된다고 보장하지 않습니다.');

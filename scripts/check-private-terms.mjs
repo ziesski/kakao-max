@@ -78,7 +78,14 @@ function* subjects(o) {
     const args = range.filter((r, i) => !(ZERO.test(r) && range[i - 1] === '--not')).filter((r, i, a) => !(r === '--not' && i === a.length - 1));
     for (const c of git('rev-list', ...args).split('\n').filter(Boolean)) {
       const short = c.slice(0, 7);
-      yield { where: `commit ${short} message`, text: git('log', '-1', '--format=%an%n%ae%n%cn%n%ce%n%B', c) };
+      const [author, authorEmail, committer, committerEmail, body] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce%x00%B', c).split('\0');
+      yield { where: `commit ${short} author`, text: `${author}\n${authorEmail}` };
+      // GitHub squash merges add this generated committer identity after PR checks.
+      // Exempt only that exact metadata pair from the public email heuristic;
+      // source, author, body and all maintainer patterns are still checked normally.
+      yield { where: `commit ${short} committer`, text: `${committer}\n${committerEmail}`,
+        generatedGitHubCommitter: committer === 'GitHub' && committerEmail === ['noreply', 'github.com'].join('@') };
+      yield { where: `commit ${short} message`, text: body };
       if (git('rev-list', '--parents', '-1', c).trim().split(' ').length > 2) continue;
       for (const s of addedLines(git('diff-tree', '-p', '-U0', '--root', '--no-commit-id', '--no-color', '--no-ext-diff', '--no-renames', '-r', c))) yield { ...s, where: `commit ${short} ${s.where}` };
       for (const p of git('diff-tree', '--root', '--no-commit-id', '--name-only', '--diff-filter=AR', '-r', '-z', c).split('\0').filter(Boolean)) yield { where: `a file name in commit ${short}`, text: p };
@@ -104,8 +111,11 @@ try {
   if (!priv) process.stderr.write('Private-terms check: maintainer list not found, checking public patterns only\n');
   const patterns = [...PUBLIC, ...(priv ?? [])];
   const hits = [];
-  for (const { where, text } of subjects(o)) {
-    for (const [label, re] of patterns) if (re.test(text)) hits.push(`${where}: ${label}`);
+  for (const { where, text, generatedGitHubCommitter } of subjects(o)) {
+    for (const [label, re] of patterns) {
+      if (label === 'email address' && generatedGitHubCommitter) continue;
+      if (re.test(text)) hits.push(`${where}: ${label}`);
+    }
   }
   if (hits.length) {
     process.stderr.write(`Private-terms check failed. Rewrite these in product terms (never bypass the check):\n${[...new Set(hits)].map(h => `  ${h}`).join('\n')}\n`);

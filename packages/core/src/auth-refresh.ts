@@ -1,5 +1,5 @@
 // Ordinary login only: no takeover, registration, or speculative renewal endpoint.
-import { KakaoAuthClient, type RefreshedCredentials } from '@kakao-max/protocol';
+import { KakaoAuthClient, authConfigForDevice, type RefreshedCredentials } from '@kakao-max/protocol';
 import type { CredentialStore } from './credentials.ts';
 import type { KakaoConfig } from './config.ts';
 import type { AuthReloginBudget } from './auth-relogin-budget.ts';
@@ -8,14 +8,17 @@ export interface AuthClientLike { login: KakaoAuthClient['login'] }
 export interface AuthFailure { status: number; accessToken: string; deviceUUID: string }
 
 export function createAuthRefresher(deps: {
-  config: Pick<KakaoConfig, 'tokenRefresh'>;
+  config: Pick<KakaoConfig, 'tokenRefresh'> & Partial<Pick<KakaoConfig, 'client'>>;
   creds: CredentialStore;
   budget: Pick<AuthReloginBudget, 'reserve' | 'stop'>;
   log: (line: string) => void;
   authClient?: (deviceName: string, deviceUUID: string) => AuthClientLike;
   wait?: (ms: number) => Promise<void>;
 }): (ctx: AuthFailure) => Promise<RefreshedCredentials | null> {
-  const makeClient = deps.authClient ?? ((name, uuid) => new KakaoAuthClient(name, uuid));
+  const makeClient = deps.authClient ?? ((name, uuid) => new KakaoAuthClient(name, uuid, {
+    ...authConfigForDevice(deps.creds.get().deviceType),
+    ...(deps.config.client ? { version: deps.config.client.appVersion, language: deps.config.client.lang } : {})
+  }));
   const wait = deps.wait ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   let pending: Promise<RefreshedCredentials | null> | undefined;
   const run = async (ctx: AuthFailure): Promise<RefreshedCredentials | null> => {
@@ -26,7 +29,7 @@ export function createAuthRefresher(deps: {
       deps.log('automatic re-login unavailable: matching device and saved email/password required');
       return null;
     }
-    const auth = makeClient(c.deviceName ?? 'KakaoWeb', c.deviceUUID);
+    const auth = makeClient(c.deviceName ?? (c.deviceType === 'tablet' ? 'SM-T870' : 'KakaoWeb'), c.deviceUUID);
     const max = deps.config.tokenRefresh.maxAttempts ?? 3;
     for (let attempt = 0; attempt < max; attempt++) {
       if (attempt) await wait(attempt * 30000);

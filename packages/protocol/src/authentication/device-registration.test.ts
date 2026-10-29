@@ -190,3 +190,44 @@ test('a login error cannot trigger registration even if a sign flag is present',
     assert.equal(result.status, 30); assert.equal(stub.calls.length, 1);
   } finally { stub.restore(); }
 });
+
+
+test('tablet registration without Mac sign flag uses passcode and retains one fresh Android identity', async () => {
+  const stub = scriptFetch([
+    { endpoint: 'login.json', status: -100 },
+    { endpoint: 'passcodeLogin/generate', status: 0, body: { passcode: '1234', remainingSeconds: 60 } },
+    { endpoint: 'passcodeLogin/registerDevice', status: 0 },
+    { endpoint: 'login.json', status: 0, body: { userId: '42', access_token: 'token' } }
+  ]);
+  try {
+    const reg = new KakaoDeviceRegistration('SM-T870', { agent: 'android' });
+    assert.match(reg.deviceUuid, /^[a-f0-9]{64}$/);
+    const codes: string[] = [];
+    const result = await reg.register('fixture@example.test', 'fixture', { onPasscode: i => codes.push(i.passcode) });
+    assert.equal(result.status, 0); assert.deepEqual(codes, ['1234']);
+    assert.equal(stub.calls[0].fields.get('device_uuid'), reg.deviceUuid);
+    assert.equal((stub.calls[1].json?.device as { uuid: string }).uuid, reg.deviceUuid);
+    assert.equal((stub.calls[2].json?.device as { uuid: string }).uuid, reg.deviceUuid);
+    assert.equal(stub.calls[3].fields.get('device_uuid'), reg.deviceUuid);
+  } finally { stub.restore(); }
+});
+
+test('tablet conflict never takes over even when the PC takeover option is set', async () => {
+  const stub = scriptFetch([{ endpoint: 'login.json', status: -101 }]);
+  try {
+    const reg = new KakaoDeviceRegistration('SM-T870', { agent: 'android' });
+    const result = await reg.register('fixture@example.test', 'fixture', { confirmTakeover: true });
+    assert.equal(result.status, -101); assert.equal(stub.calls.length, 1);
+    assert.equal(stub.calls[0].fields.get('forced'), 'false');
+  } finally { stub.restore(); }
+});
+
+test('tablet does not request a code without a human callback or guess an unknown registration method', async () => {
+  for (const body of [{}, { registerDeviceWithSign: true }, { registerDeviceWithSign: 'invalid' }]) {
+    const stub = scriptFetch([{ endpoint: 'login.json', status: -100, body }]);
+    try {
+      const result = await new KakaoDeviceRegistration('SM-T870', { agent: 'android' }).register('fixture@example.test', 'fixture');
+      assert.equal(result.failure, 'unsupported-method'); assert.equal(stub.calls.length, 1);
+    } finally { stub.restore(); }
+  }
+});

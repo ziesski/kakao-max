@@ -237,3 +237,21 @@ test('CLI MCP host accepts hostnames and IPs but rejects URL and whitespace inpu
     assert.throws(() => loadConfig({ envPath: NO_FILE, env: { MCP_HOST: value } }), { code: 'CONFIG_INVALID' }, value);
   }
 });
+
+
+test('device identity defaults to legacy PC and refuses selector-only migration', () => {
+  const load = (env: Record<string, string | undefined>) => loadConfig({ envPath: NO_FILE, env });
+  assert.equal(load({}).credentials.deviceType, 'pc');
+  const tablet = load({ KAKAO_DEVICE_TYPE: 'tablet' });
+  assert.equal(tablet.client.os, 'android'); assert.equal(tablet.client.appVersion, '25.9.2');
+  for (const env of [
+    { KAKAO_DEVICE_TYPE: 'tablet', KAKAO_REGISTERED_DEVICE_UUID: 'legacy' },
+    { KAKAO_DEVICE_TYPE: 'tablet', KAKAO_ACCESS_TOKEN: 'legacy' },
+    { KAKAO_DEVICE_TYPE: 'pc', KAKAO_REGISTERED_DEVICE_TYPE: 'tablet' },
+    { KAKAO_REGISTERED_DEVICE_TYPE: 'tablet', KAKAO_REGISTERED_DEVICE_UUID: 'legacy' },
+    { KAKAO_DEVICE_TYPE: 'tablet', KAKAO_CLIENT_OS: 'mac' },
+    { KAKAO_DEVICE_TYPE: 'unknown' }
+  ]) assert.throws(() => load(env), { code: 'CONFIG_INVALID' });
+  const saved = load({ KAKAO_REGISTERED_DEVICE_TYPE: 'tablet', KAKAO_REGISTERED_DEVICE_UUID: 'a'.repeat(64), KAKAO_ACCESS_TOKEN: 'fixture' });
+  assert.equal(saved.client.os, 'android'); assert.equal(saved.credentials.deviceType, 'tablet');
+});

@@ -391,3 +391,13 @@ test('migration failure if credentials in .env.local are modified beyond KAKAO_D
   await assert.rejects(updateManaged(f.host), { code: 'STORAGE_UNSAFE' });
   assert.ok(!f.commands.includes('systemctl start kakao-max.service'), 'new unit was not started');
 });
+
+
+test('changing a managed device type refuses before stopping the existing daemon', async t => {
+  for (const kind of ['selector', 'manifest'] as const) {
+    const f = fixture(t);
+    fs.appendFileSync(f.env, kind === 'selector' ? '\nKAKAO_DEVICE_TYPE=tablet\n' : `\nKAKAO_REGISTERED_DEVICE_TYPE=tablet\nKAKAO_REGISTERED_DEVICE_UUID=${'a'.repeat(64)}\n`);
+    await assert.rejects(updateManaged(f.host), { code: 'CONFIG_INVALID' });
+    assert.ok(!f.commands.some(c => c === 'systemctl stop kakao-max.service'));
+  }
+});

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { loadConfig, toKakaoError, programArgs, installRoot } from '@kakao-max/core';
+import { loadConfig, toKakaoError, programArgs, installRoot, KakaoError } from '@kakao-max/core';
 import { resolveRoom } from './room-resolution.ts';
 import { randomUUID } from 'node:crypto';
 import { sendMessage, sendPhotos, submitWrite, approvalLink } from './agent-send-client.ts';
@@ -11,6 +11,9 @@ import { McpClient, McpToolError } from './mcp-client.ts';
 import { readRoomSmokeAccess } from './smoke-read-scope.ts';
 import { runChatShell } from './chat-shell.ts';
 import { runTerminalMessenger } from './terminal-messenger.ts';
+import { messageAttachments, mediaTypeName, parseMediaType } from './attachments.ts';
+import { COMMANDS, parseCommand, type CliContext } from './commands.ts';
+import { renderCommand, renderOverview, suggest, type Paint } from './help.ts';
 
 // ----------------------------------------------------------------------------
 // CLI and terminal messenger share the daemon's MCP policies and connection.
@@ -62,8 +65,8 @@ interface KakaoBackend {
   sendMedia(chatId: string, filePath: string, type: number, requestId: string): Promise<{ status: number; logId?: string }>;
   markRead(chatId: string, watermark: string, requestId: string): Promise<any>;
   getRoomAccess(chatId: string): Promise<{ rule: { mode: string } }>;
-  getHistory(chatId: string, limit?: number, readGrantId?: string): Promise<{ title?: string; members?: Record<string, { name: string }>; messages: any[]; sync?: any; untrusted?: boolean }>;
-  searchMessages(query: string, chatId?: string, limit?: number, readGrantId?: string): Promise<{ count: number; messages: any[] }>;
+  getHistory(chatId: string, limit?: number, readGrantId?: string, requestId?: string): Promise<{ title?: string; members?: Record<string, { name: string }>; messages: any[]; sync?: any; untrusted?: boolean }>;
+  searchMessages(query: string, chatId: string, limit?: number, readGrantId?: string, requestId?: string): Promise<{ count: number; messages: any[] }>;
   downloadMedia(chatId: string, token: string, outputPath: string, type?: number, isMini?: boolean, messageId?: string, readGrantId?: string): Promise<any>;
   listFriends(query?: string, limit?: number): Promise<{ count: number; friends: any[] }>;
   syncFriends(): Promise<{ ok: boolean; totalFriends: number }>;
@@ -100,8 +103,11 @@ async function getBackend(): Promise<KakaoBackend> {
     // A read receipt always needs approval (and the daemon's chats tool group).
     markRead: (chatId, watermark, requestId) => submitWrite(mcp, 'mark_read', { chatId, watermark, requestId }, 'operation'),
     getRoomAccess: async chatId => (await tool('list_chats', { chatId })).access,
-    getHistory: (chatId, limit = 50, readGrantId) => tool('read_messages', { chatId, limit, ...(readGrantId ? { readGrantId } : {}) }),
-    searchMessages: (query, chatId, limit = 20, readGrantId) => tool('read_messages', { mode: 'search', query, chatId, limit, ...(readGrantId ? { readGrantId } : {}) }),
+    // A closed room answers APPROVAL_REQUIRED naming requestId; repeating that requestId after approval reads once.
+    getHistory: (chatId, limit = 50, readGrantId, requestId) =>
+      tool('read_messages', { chatId, limit, ...(readGrantId ? { readGrantId } : requestId ? { requestId } : {}) }),
+    searchMessages: (query, chatId, limit = 20, readGrantId, requestId) =>
+      tool('read_messages', { mode: 'search', query, chatId, limit, ...(readGrantId ? { readGrantId } : requestId ? { requestId } : {}) }),
     // The daemon may run on another host: take the bytes and write them here, never at a daemon path.
     downloadMedia: async (chatId, token, outputPath, type = 2, isMini = false, messageId, readGrantId) => {
       const res = await tool('download_attachment', { chatId, token, type, isMini, messageId, ...(readGrantId ? { readGrantId } : {}) });
@@ -258,9 +264,10 @@ async function cmdSendMedia(targetArg: string, filePath: string, type: number = 
   }
 }
 
-async function cmdDownloadMedia(targetArg: string, token: string, outputPath: string, isMini = false, messageId?: string, readGrantId?: string) {
+async function cmdDownloadMedia(targetArg: string, token: string, outputPath: string, type: number, isMini = false, messageId?: string, readGrantId?: string) {
   if (!targetArg || !token || !outputPath || !messageId) {
-    console.error(`\n${c.red}❌ 사용법: kakao download <대화방> <token> <저장경로> --message-id <logId> [--mini] [--read-grant <id>]${c.reset}\n`);
+    console.error(`\n${c.red}❌ 사용법: kakao download <대화방> <token> <저장경로> --message-id <logId> [--type photo|video|audio|file] [--mini] [--read-grant <id>]${c.reset}`);
+    console.error(`${c.gray}token, message-id, type 은 'kakao history <대화방>' 의 📎 줄에 나옵니다.${c.reset}\n`);
     process.exit(1);
   }
 
@@ -274,7 +281,7 @@ async function cmdDownloadMedia(targetArg: string, token: string, outputPath: st
 
   process.stdout.write(`${c.dim}[다운로드 중]${c.reset} ${c.bold}${chat.title || chat.id}${c.reset} 에서 미디어 다운로드 중... `);
   try {
-    const res = await backend.downloadMedia(chat.id, token, outputPath, 2, isMini, messageId, readGrantId);
+    const res = await backend.downloadMedia(chat.id, token, outputPath, type, isMini, messageId, readGrantId);
     console.log(`\r${c.green}✅ [다운로드 완료]${c.reset} ${c.cyan}${outputPath}${c.reset} (${res.size || 'N/A'} bytes)\n`);
   } catch (e: any) {
     process.exitCode = 1;
@@ -339,7 +346,7 @@ async function cmdFriends(query?: string) {
   }
 }
 
-async function cmdHistory(targetArg: string, limitArg?: string, readGrantId?: string) {
+async function cmdHistory(targetArg: string, limitArg?: string, readGrantId?: string, requestId: string = randomUUID()) {
   if (!targetArg) {
     console.error(`\n${c.red}❌ 사용법: kakao history <대화방/친구이름> [개수]${c.reset}\n`);
     process.exit(1);
@@ -355,7 +362,7 @@ async function cmdHistory(targetArg: string, limitArg?: string, readGrantId?: st
   const limit = Number(limitArg) || 20;
   process.stdout.write(`${c.dim}[조회 중...]${c.reset} ${c.bold}${chat.title || chat.id}${c.reset} 최근 ${limit}개 메시지 불러오는 중... `);
   try {
-    const res = await backend.getHistory(chat.id, limit, readGrantId);
+    const res = await backend.getHistory(chat.id, limit, readGrantId, requestId);
     const msgs = res.messages || [];
     console.log(`\r${c.green}✅ [조회 완료]${c.reset} ${c.bold}${chat.title || chat.id}${c.reset} (${msgs.length}개 메시지)\n`);
     console.log(`${c.gray}${'─'.repeat(70)}${c.reset}`);
@@ -363,7 +370,12 @@ async function cmdHistory(targetArg: string, limitArg?: string, readGrantId?: st
       const timeStr = formatTime(m.sendAt);
       const isMe = String(m.authorId) === String(state.userId);
       const sender = isMe ? `${c.yellow}[나]${c.reset}` : `${c.cyan}[${m.authorName || (res.members && res.members[m.authorId]?.name) || m.authorId || '상대방'}]${c.reset}`;
-      console.log(` ${c.dim}${timeStr}${c.reset}  ${sender}  ${m.text || c.dim + '(미디어/첨부)' + c.reset}`);
+      const media = messageAttachments(m);
+      const body = m.text && !(media.length && String(m.text).trim().startsWith('{')) ? m.text : c.dim + '(미디어/첨부)' + c.reset;
+      console.log(` ${c.dim}${timeStr}${c.reset}  ${sender}  ${body}`);
+      for (const a of media) {
+        console.log(`        ${c.gray}📎 ${mediaTypeName(a.type)}: kakao download ${chat.id} ${a.token} <저장경로> --message-id ${m.messageId} --type ${mediaTypeName(a.type)}${c.reset}`);
+      }
     }
     console.log(`${c.gray}${'─'.repeat(70)}${c.reset}`);
     const s = res.sync;
@@ -374,26 +386,29 @@ async function cmdHistory(targetArg: string, limitArg?: string, readGrantId?: st
     console.log('');
   } catch (e: any) {
     process.exitCode = 1;
-    console.log(`\r${c.red}❌ [조회 실패]${c.reset} ${e.message}\n`);
+    if (e.code === 'APPROVAL_REQUIRED') reportWriteError(e, requestId);
+    else console.log(`\r${c.red}❌ [조회 실패]${c.reset} ${e.message}\n`);
   }
 }
 
-async function cmdSearch(query: string, targetArg?: string, readGrantId?: string) {
-  if (!query) {
-    console.error(`\n${c.red}❌ 사용법: kakao search "<검색어>" <대화방>${c.reset}\n`);
+// read_messages searches one room at a time; there is no account-wide search.
+async function cmdSearch(query: string, targetArg?: string, readGrantId?: string, requestId: string = randomUUID()) {
+  if (!query || !targetArg) {
+    console.error(`\n${c.red}❌ 사용법: kakao search "<검색어>" <대화방>${c.reset} ${c.gray}(검색은 한 방씩만 가능합니다)${c.reset}\n`);
     process.exit(1);
   }
   const backend = await getBackend();
   const state = await backend.getState();
-  let chatId: string | undefined = undefined;
-  if (targetArg) {
-    const chat = resolveRoom(state.chats, targetArg);
-    if (chat) chatId = chat.id;
+  const chat = resolveRoom(state.chats, targetArg);
+  if (!chat) {
+    console.error(`\n${c.red}❌ 대화방을 찾을 수 없습니다: "${targetArg}"${c.reset}\n`);
+    process.exit(1);
   }
+  const chatId = chat.id;
 
   process.stdout.write(`${c.dim}[검색 중...]${c.reset} "${query}" 메시지 검색 중... `);
   try {
-    const res = await backend.searchMessages(query, chatId, 20, readGrantId);
+    const res = await backend.searchMessages(query, chatId, 20, readGrantId, requestId);
     const msgs = res.messages || [];
     console.log(`\r${c.green}✅ [검색 완료]${c.reset} "${c.bold}${query}${c.reset}" 결과: ${msgs.length}건\n`);
     for (const m of msgs) {
@@ -404,8 +419,41 @@ async function cmdSearch(query: string, targetArg?: string, readGrantId?: string
     console.log('');
   } catch (e: any) {
     process.exitCode = 1;
-    console.log(`\r${c.red}❌ [검색 실패]${c.reset} ${e.message}\n`);
+    if (e.code === 'APPROVAL_REQUIRED') reportWriteError(e, requestId);
+    else console.log(`\r${c.red}❌ [검색 실패]${c.reset} ${e.message}\n`);
   }
+}
+
+/** A command from commands.ts: one daemon tool, its JSON result printed as is. */
+async function cmdTool(name: string, argv: string[]) {
+  const { command, args, values, requestId = randomUUID() } = parseCommand(name, argv);
+  const mcp = new McpClient({ host: MCP_HOST, port: MCP_PORT });
+  try { await mcp.connect(); }
+  catch (e) {
+    console.error(`${c.red}❌ 카카오톡 MCP 데몬(${MCP_HOST}:${MCP_PORT})에 연결할 수 없습니다.${c.reset} ${c.dim}${(e as Error).message}${c.reset}`);
+    process.exit(1);
+  }
+  const cli: CliContext = {
+    requestId,
+    call: (tool, toolArgs = {}) => mcp.callTool(tool, toolArgs),
+    write: (tool, toolArgs, kind) => submitWrite(mcp, tool, { ...toolArgs, requestId }, kind),
+    async room(target) {
+      const chat = resolveRoom((await mcp.callTool('list_chats')).chats || [], target);
+      if (!chat) throw new KakaoError('NOT_FOUND', `대화방을 찾을 수 없습니다: "${target}" ('kakao ls' 또는 'kakao find-room' 으로 확인)`);
+      return chat.id;
+    }
+  };
+  try {
+    console.log(JSON.stringify(await command.run(cli, args, values), null, 2));
+  } catch (e: any) {
+    process.exitCode = 1;
+    if (['APPROVAL_REQUIRED', 'SEND_OUTCOME_UNKNOWN', 'MUTATION_OUTCOME_UNKNOWN'].includes(e.code)) reportWriteError(e, requestId);
+    else if (command.group && /^unknown tool:/.test(e.message)) {
+      // A tool in a group the daemon did not enable is not listed at all.
+      console.log(`${c.red}❌ ${e.message}${c.reset}`);
+      console.log(`${c.gray}이 명령은 데몬의 '${command.group}' 도구 묶음이 필요합니다 (KAKAO_MCP_TOOL_GROUPS).${c.reset}`);
+    } else console.log(`${c.red}❌ [${e.code ?? '오류'}]${c.reset} ${e.message}`);
+  } finally { mcp.close(); }
 }
 
 // Read-only smoke test against the live MCP daemon. Never sends, restores, or writes;
@@ -468,6 +516,9 @@ async function cmdTest(groupOnly = false, chatId?: string) {
     }
     throw new Error('Expected POLICY_DENIED but content access succeeded');
   }
+  // A deny room asks the person when read without a grant. Probing with a grant ID that cannot exist skips
+  // that prompt and must still be refused, so the smoke never leaves an approval request behind.
+  const noGrant = `smoke-no-grant-${randomUUID()}`;
   let denyMode = false;
   let sample: any;
   let sampleChatId: string | undefined;
@@ -479,7 +530,7 @@ async function cmdTest(groupOnly = false, chatId?: string) {
     const access = await backend.getRoomAccess(recent.id);
     denyMode = access.rule.mode === 'deny';
     if (denyMode) {
-      await expectPolicyDenied(() => backend.getHistory(recent.id, 1));
+      await expectPolicyDenied(() => backend.getHistory(recent.id, 1, noGrant));
       return 'deny 정책으로 내용 조회 차단 확인';
     }
     const hist = await readRoom.history(recent.id, 20);
@@ -495,8 +546,9 @@ async function cmdTest(groupOnly = false, chatId?: string) {
   });
 
   await check('search_messages: 허용 방 검색 또는 명시적 접근 차단', async () => {
-    if (denyMode && sampleChatId) {
-      await expectPolicyDenied(() => backend.searchMessages('policy-smoke', sampleChatId, 1));
+    const deniedChatId = sampleChatId;
+    if (denyMode && deniedChatId) {
+      await expectPolicyDenied(() => backend.searchMessages('policy-smoke', deniedChatId, 1, noGrant));
       return 'deny 정책으로 검색 차단 확인';
     }
     assert(sample && sampleChatId, '읽은 방의 검색용 텍스트 메시지가 없음');
@@ -524,49 +576,25 @@ async function cmdTest(groupOnly = false, chatId?: string) {
   }
 }
 
-function cmdHelp() {
-  console.log(`
-${c.bold}KakaoTalk Native Terminal CLI${c.reset}
-카카오톡을 리눅스/macOS 터미널에서 제어하는 커맨드라인 도구입니다.
+const paint: Paint = { bold: s => c.bold + s + c.reset, cyan: s => c.cyan + s + c.reset, gray: s => c.gray + s + c.reset, yellow: s => c.yellow + s + c.reset };
 
-${c.bold}사용 가능한 명령어:${c.reset}
-  ${c.cyan}kakao chat${c.reset}                             방 검색·방향키·입력창으로 쓰는 터미널 메신저
-  ${c.cyan}kakao shell${c.reset}                            ls/cd/Tab으로 방을 고르고 대화하기
-  ${c.cyan}kakao shell --demo --show-room "공개할 방"${c.reset}  다른 방 이름을 숨기는 촬영 모드
-  ${c.cyan}kakao ls${c.reset} (또는 ${c.cyan}list${c.reset})                       대화방 목록과 안읽은 메시지 확인
-  ${c.cyan}kakao friends [검색어]${c.reset}                  카카오톡 친구 목록 및 연락처 검색
-  ${c.cyan}kakao history <대화방/친구> [개수]${c.reset}     과거 대화 내역 조회 (단축: hist)
-  ${c.cyan}kakao search "<검색어>" <대화방>${c.reset}        메시지 검색
-  ${c.cyan}kakao test${c.reset}                             MCP 핵심 도구 E2E 스모크 테스트 실행
-  ${c.cyan}kakao send <대화방> "<메시지>"${c.reset}          발신 (허용한 방은 바로, 아니면 승인 링크 출력)
-  ${c.cyan}kakao send-photo <대화방> <파일경로>${c.reset}    사진 발신 (승인 방식은 send와 같음)
-  ${c.cyan}kakao send-file <대화방> <파일경로>${c.reset}     파일 발신 (승인 방식은 send와 같음)
-  ${c.cyan}kakao submit <request.json>${c.reset}             요청 파일(mode 0600) 실행: 승인 요청 → 승인 후 같은 파일로 다시 실행
-  ${c.cyan}kakao download <대화방> <token> <저장경로>${c.reset}  미디어 다운로드 (단축: dl, 옵션: --mini)
-  ${c.cyan}kakao read <대화방>${c.reset}                    읽음 처리 (항상 승인 필요, 데몬의 chats 도구 묶음 필요)
-  승인이 필요하면 링크가 출력됩니다. 승인한 뒤 같은 명령에 ${c.cyan}--request-id <id>${c.reset}를 붙여 다시 실행하세요.
-  ${c.cyan}kakao status${c.reset}                            현재 LOCO 세션 연결 상태 확인
-  ${c.cyan}kakao help${c.reset}                              도움말 보기
-  ${c.cyan}kakao --version${c.reset}                         설치된 kakao-max 버전 보기
-  ${c.cyan}kakao setup${c.reset} [--doctor|--repair|--update]   데몬 설치·연결 마법사
-  ${c.cyan}kakao web${c.reset}                               내 브라우저용 로컬 웹 화면 시작
-  ${c.cyan}kakao approver${c.reset} enroll|list|remove <id>     승인 패스키 관리(데몬 서버 터미널)
+/** Overview of every command, or one command's usage when a name is given. */
+function cmdHelp(topic?: string): boolean {
+  if (!topic) {
+    console.log('\n' + renderOverview(paint) + '\n');
+    return true;
+  }
+  const page = renderCommand(topic, paint);
+  if (page) console.log('\n' + page + '\n');
+  else unknownCommand(topic);
+  return page !== undefined;
+}
 
-${c.bold}대화방 지정 옵션 (<대화방>):${c.reset}
-  • ${c.yellow}#1, #2, #3...${c.reset} 'kakao ls' 번호. 정확한 Chat ID가 번호보다 우선
-  • 수동 접근 방 열람은 사람이 승인한 읽기 허가의 --read-grant <id> 필요 (스모크는 승인하지 않음)
-  • ${c.yellow}self / me${c.reset}     나와의 채팅방으로 전송
-  • ${c.yellow}"김철수"${c.reset}       방 이름 또는 상대방 이름의 일부/전체
-  • ${c.yellow}9284102941${c.reset}   카카오톡 고유 Chat ID
-
-${c.bold}예시:${c.reset}
-  $ kakao ls
-  $ kakao history "홍길동" 10
-  $ kakao search "프로토콜" "홍길동"
-  $ kakao test
-  $ kakao send self "나에게 보내는 테스트 메모"
-  $ kakao send 1 "안녕하세요!"
-`);
+function unknownCommand(name: string): void {
+  const near = suggest(name);
+  console.error(`${c.red}알 수 없는 명령어: ${name}${c.reset}`);
+  if (near.length) console.error(`혹시: ${near.map(n => c.cyan + 'kakao ' + n + c.reset).join(', ')}`);
+  console.error(`${c.gray}전체 명령어: kakao help${c.reset}`);
 }
 
 /** `kakao setup|web|approver ...`: run that program of this install in the same terminal. */
@@ -582,6 +610,12 @@ function runProgram(name: 'setup' | 'web' | 'approver', args: string[]): number 
 async function main() {
   const [,, cmd, ...args] = process.argv;
   const option = (name: string) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1]; };
+
+  // `<명령어> --help` shows that command's usage and never runs it (a send stays unsent).
+  if (cmd && !['help', 'commands', '--help', '-h'].includes(cmd) && (args.includes('--help') || args.includes('-h'))) {
+    if (!cmdHelp(cmd)) process.exitCode = 1;
+    return;
+  }
 
   switch (cmd) {
     case 'chat':
@@ -600,11 +634,11 @@ async function main() {
       break;
     case 'hist':
     case 'history':
-      await cmdHistory(args[0], args[1]?.startsWith('--') ? undefined : args[1], option('--read-grant'));
+      await cmdHistory(args[0], args[1]?.startsWith('--') ? undefined : args[1], option('--read-grant'), option('--request-id'));
       break;
     case 'search':
     case 'find':
-      await cmdSearch(args[0], args[1]?.startsWith('--') ? undefined : args[1], option('--read-grant'));
+      await cmdSearch(args[0], args[1]?.startsWith('--') ? undefined : args[1], option('--read-grant'), option('--request-id'));
       break;
     case 'test':
     case 'smoke':
@@ -640,7 +674,7 @@ async function main() {
     case 'download':
     case 'download-media':
     case 'dl':
-      await cmdDownloadMedia(args[0], args[1], args[2], args.includes('--mini'), args.includes('--message-id') ? args[args.indexOf('--message-id') + 1] : undefined, option('--read-grant'));
+      await cmdDownloadMedia(args[0], args[1], args[2], parseMediaType(option('--type')), args.includes('--mini'), option('--message-id'), option('--read-grant'));
       break;
     case 'read':
       await cmdRead(args[0], option('--request-id'));
@@ -654,9 +688,10 @@ async function main() {
       process.exitCode = runProgram(cmd, args);
       break;
     case 'help':
+    case 'commands':
     case '--help':
     case '-h':
-      cmdHelp();
+      if (!cmdHelp(args[0])) process.exitCode = 1;
       break;
     case 'version':
     case '--version':
@@ -667,9 +702,10 @@ async function main() {
       if (!cmd) {
         // Default to ls if no command given
         await cmdList();
+      } else if (Object.hasOwn(COMMANDS, cmd)) {
+        await cmdTool(cmd, args);
       } else {
-        console.error(`${c.red}알 수 없는 명령어: ${cmd}${c.reset}`);
-        cmdHelp();
+        unknownCommand(cmd);
         process.exit(1);
       }
   }

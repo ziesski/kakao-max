@@ -862,7 +862,8 @@ test('fresh exact metadata confirms a read room absent from the list without sen
     { header: { status: 0 }, data: { chatInfo: { chatId: Long.fromString(CHAT), newMessageCount: 0, invalidNewMessageCount: false } } }
   ];
   assert.deepEqual(await kakao.inspectRoomReadState(CHAT), {
-    confirmed: true, reason: 'confirmed_read', localUnreadCount: 1, serverUnreadCount: 0, source: 'chat_info'
+    confirmed: true, reason: 'confirmed_read', localUnreadCount: 1, serverUnreadCount: 0, source: 'chat_info',
+    verification: { countValid: true, watermarkKnown: false, watermarkCoversHead: false }
   });
   assert.equal(kakao.listChats()[0].unreadCount, 0);
   assert.deepEqual(fake.calls.filter(c => c.method === 'request').map(c => c.args[0]), ['LCHATLIST', 'CHATINFO']);
@@ -903,4 +904,42 @@ test('missing-room metadata refresh cannot erase a concurrent push or hide a ser
   fake.request = async (method: string) => method === 'LCHATLIST' ? { header: { status: 0 }, data: { chatDatas: [] } } :
     { header: { status: -500 }, data: { status: -500 } };
   await assert.rejects(kakao.inspectRoomReadState(CHAT), isCode('LOCO_STATUS'));
+});
+
+
+test('exact account read watermark can verify a missing room whose count is unknown', async () => {
+  for (const seen of ['9007199254740993', Long.fromString('9007199254740994')]) {
+    const { kakao, fake } = setup(); phoneRead(kakao);
+    fake.replies.request = [
+      { header: { status: 0 }, data: { chatDatas: [] } },
+      { header: { status: 0 }, data: { chatInfo: { chatId: CHAT, invalidNewMessageCount: true,
+        lastLogId: Long.fromString('9007199254740993'), lastSeenLogId: seen } } }
+    ];
+    const result = await kakao.inspectRoomReadState(CHAT);
+    assert.equal(result.confirmed, true);
+    assert.equal(result.source, 'chat_info_watermark');
+    assert.equal(result.serverUnreadCount, 0);
+    assert.equal(kakao.listChats()[0].unreadCount, 0);
+  }
+});
+
+test('unknown, unsafe, stale or other-room watermarks never confirm a read room', async () => {
+  for (const extra of [
+    { lastSeenLogId: '9007199254740992' },
+    { lastSeenLogId: undefined },
+    { lastSeenLogId: 9007199254740992 },
+    { lastLogId: '0', lastSeenLogId: '9007199254740993' },
+    { lastSeenLogId: '9007199254740993', chatId: '123' },
+    { lastSeenLogId: '9007199254740993', newMessageCount: 1, invalidNewMessageCount: false }
+  ]) {
+    const { kakao, fake } = setup(); phoneRead(kakao);
+    fake.emit('message', { chatId: CHAT, messageId: '100', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
+    fake.replies.request = [
+      { header: { status: 0 }, data: { chatDatas: [] } },
+      { header: { status: 0 }, data: { chatInfo: { chatId: CHAT, invalidNewMessageCount: true,
+        lastLogId: '9007199254740993', ...extra } } }
+    ];
+    assert.equal((await kakao.inspectRoomReadState(CHAT)).confirmed, false);
+    assert.notEqual(kakao.listChats()[0].unreadCount, 0);
+  }
 });

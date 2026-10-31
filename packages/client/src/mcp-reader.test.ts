@@ -100,3 +100,33 @@ test('failed metadata refresh stops before requesting message contents', async (
   await assert.rejects(reader.history('2'), e => e === failure);
   assert.deepEqual(calls, ['list_chats']);
 });
+
+test('live read receipts advance the cursor without becoming messages or stopping subsequent updates', async () => {
+  const f = fixture();
+  const receipt = { seq: 5, chatId: '2', authorId: '', type: -1, text: '', raw: { isReadReceipt: true, watermark: '10' } };
+  f.set({ cursor: 5, messages: [receipt] });
+  assert.deepEqual(await f.reader.updates('2', '10', ['10'], 4), {
+    messages: [], removedIds: [], reset: false, cursor: 5
+  });
+  f.set({ cursor: 7, messages: [{ ...message('11'), seq: 6 }, { ...receipt, seq: 7 }] });
+  const next = await f.reader.updates('2', '10', ['10'], 5);
+  assert.deepEqual(next.messages.map(m => m.messageId), ['11']);
+  assert.equal(next.cursor, 7);
+  assert.deepEqual(f.calls.at(-1), { name: 'read_messages', args: { chatId: '2', mode: 'recent', sinceSeq: 5 } });
+});
+
+test('only explicit live read receipts are omitted; malformed message identities still fail', async () => {
+  const f = fixture();
+  for (const row of [
+    null,
+    { authorId: '1', type: 1 },
+    { authorId: '1', type: -1 },
+    { authorId: '1', type: 1, raw: { isReadReceipt: true } },
+    { messageId: 'invalid', authorId: '1' }
+  ]) {
+    f.set({ cursor: 1, messages: [row] });
+    await assert.rejects(f.reader.updates('2', '10', ['10']), { code: 'INVALID_RESPONSE' });
+  }
+  f.set({ messages: [{ type: -1, raw: { isReadReceipt: true } }] });
+  await assert.rejects(f.reader.history('2'), { code: 'INVALID_RESPONSE' });
+});

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { wasRequest } from './was-http.ts';
+import { wasRequest, wasHeaders } from './was-http.ts';
 import { KakaoError } from './errors.ts';
 
 const CLIENT = { appVersion: '26.4.0', os: 'mac' as const, lang: 'ko', timeZone: 'Asia/Seoul' };
@@ -66,4 +66,11 @@ test('HTTP parsing and transport failures never expose upstream bodies or creden
       return true;
     });
   }
+});
+
+test('tablet WAS headers use Android identity with the registered device key', () => {
+  const headers = wasHeaders({ ...CLIENT, os: 'android', appVersion: '25.9.2' }, { accessToken: 'fixture', deviceUUID: 'a'.repeat(64) });
+  assert.equal(headers.A, 'android/25.9.2/ko');
+  assert.equal(headers['User-Agent'], 'KT/25.9.2 An/13 ko');
+  assert.equal(headers.Authorization, `fixture-${'a'.repeat(64)}`);
 });

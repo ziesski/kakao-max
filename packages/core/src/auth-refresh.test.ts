@@ -73,3 +73,19 @@ test('durable budget survives restarts, allows a fresh window, and fails closed 
   if (process.platform !== 'win32') { fs.unlinkSync(f.file); fs.symlinkSync(path.join(path.dirname(f.file), 'target'), f.file);
   assert.throws(() => budget().reserve(), /Invalid re-login budget/); }
 });
+
+
+test('tablet re-login uses persisted identity and configured version, never a Mac request', async t => {
+  const f = fixture(t, []); f.state.deviceType = 'tablet'; f.state.deviceUUID = 'a'.repeat(64);
+  t.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    assert.match(String(url), /\/android\/account\/login.json$/);
+    assert.equal((init.headers as Record<string, string>).A, 'android/26.9.0/ko');
+    assert.equal(new URLSearchParams(String(init.body)).get('forced'), 'false');
+    assert.equal(new URLSearchParams(String(init.body)).get('device_uuid'), f.state.deviceUUID);
+    return new Response(JSON.stringify(success.raw ? { status: 0, ...success.raw } : {}));
+  });
+  const refresh = createAuthRefresher({ config: { tokenRefresh: { enabled: true }, client: { os: 'android', appVersion: '26.9.0', lang: 'ko', timeZone: 'Asia/Seoul' } },
+    creds: f.creds, budget: { reserve: () => true, stop: () => {} }, log: () => {} });
+  assert.deepEqual(await refresh({ ...ctx, deviceUUID: f.state.deviceUUID }), { accessToken: 'new' });
+  assert.equal(f.state.deviceType, 'tablet');
+});

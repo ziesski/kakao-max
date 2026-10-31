@@ -1,3 +1,4 @@
+import { loadConfig } from '@kakao-max/core';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -95,4 +96,15 @@ test('describeResult omits account IDs, device keys, tokens and upstream message
   assert.match(fail, /did not complete/);
   assert.match(fail, /status -142/);
   assert.equal(fail.includes('fixture-private'), false);
+});
+
+test('tablet registration persists a bound identity that reloads as Android', () => {
+  const { dir, envPath } = (() => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablet-register-')); return { dir, envPath: path.join(dir, '.env.local') }; })();
+  try {
+    persistRegistration({ envPath, deviceUuid: 'a'.repeat(64), deviceType: 'tablet', deviceName: 'SM-T870', credentials: { userId: '42', accessToken: 'fixture' } });
+    const saved = fs.readFileSync(envPath, 'utf8');
+    assert.match(saved, /KAKAO_REGISTERED_DEVICE_TYPE=tablet/);
+    assert.equal(loadConfig({ envPath, env: {} }).client.os, 'android');
+    assert.equal(fs.statSync(envPath).mode & 0o777, 0o600);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

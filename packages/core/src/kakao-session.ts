@@ -92,6 +92,7 @@ export class KakaoSession {
   private readonly roomAccess: RoomAccessPolicy;
   private readonly profile: ProfileManager;
   readonly vault: LocalVault;
+  private readonly readAccessListeners = new Set<(chatId?: string) => void>();
   private readonly readerWatermarks = new Map<string, string>();
   private readonly leftListeners: Array<(chatId: string, reason: LeftReason) => void> = [];
   private connected = false;
@@ -146,6 +147,7 @@ export class KakaoSession {
     });
     this.session.on('reconnecting', (i: { attempt: number; delayMs: number }) => {
       this.connected = false;
+      this.readAccessChanged();
       this.log(`reconnecting (attempt ${i.attempt}, in ${i.delayMs}ms)`);
     });
     this.session.on('refreshed', () => this.log('credentials refreshed; reconnecting with new token'));
@@ -328,7 +330,7 @@ export class KakaoSession {
   }
 
   setRoomAccess(chatId: string, rule: unknown) {
-    return { chatId, rule: this.roomAccess.set(chatId, rule) };
+    const result = { chatId, rule: this.roomAccess.set(chatId, rule) }; this.readAccessChanged(chatId); return result;
   }
 
   /** Only from a human-approved read_room operation. */
@@ -338,7 +340,7 @@ export class KakaoSession {
   listReadGrants() { return this.roomAccess.listReadGrants(); }
   /** Rooms whose content rule is not deny (no message contents). */
   listRoomAccess() { return this.roomAccess.listRules(); }
-  revokeReadGrant(grantId: string) { return this.roomAccess.revokeReadGrant(grantId); }
+  revokeReadGrant(grantId: string) { const result = this.roomAccess.revokeReadGrant(grantId); this.readAccessChanged(); return result; }
 
   /**
    * Called after this account left a room, by any path. Permissions approved for that membership must not
@@ -349,6 +351,7 @@ export class KakaoSession {
   private chatLeft(chatId: string, reason: LeftReason): void {
     if (!/^[1-9]\d{0,18}$/.test(chatId)) return;
     this.chats.remove(chatId);
+    this.readAccessChanged(chatId);
     try {
       const r = this.roomAccess.forgetRoom(chatId, reason);
       if (r.rule || r.readGrants) this.log(`left room (${reason}): withdrew read rule=${r.rule} readGrants=${r.readGrants}`);
@@ -361,17 +364,17 @@ export class KakaoSession {
 
   /** Narrowing only; broadening from an agent goes through the approved operation engine. */
   tightenRoomAccess(chatId: string, rule: unknown) {
-    return { chatId, rule: this.roomAccess.tighten(chatId, rule) };
+    const result = { chatId, rule: this.roomAccess.tighten(chatId, rule) }; this.readAccessChanged(chatId); return result;
   }
 
   /** Narrowing only: drops the stored rule when the default is no broader, otherwise APPROVAL_REQUIRED. */
   restoreDefaultRoomAccess(chatId: string) {
-    return { chatId, ...this.roomAccess.restoreDefault(chatId) };
+    const result = { chatId, ...this.roomAccess.restoreDefault(chatId) }; this.readAccessChanged(chatId); return result;
   }
 
   /** Only from a human-approved reset_room_access operation. */
   resetRoomAccess(chatId: string) {
-    return { chatId, rule: this.roomAccess.reset(chatId) };
+    const result = { chatId, rule: this.roomAccess.reset(chatId) }; this.readAccessChanged(chatId); return result;
   }
 
   /** The rule this room would have with nothing stored (deny, or immediate for memo chat and trust). */
@@ -674,9 +677,10 @@ export class KakaoSession {
   }
 
   async getHistory(chatId: string, opts: { max?: string; limit?: number; cur?: string; confirmRead?: boolean; readGrant?: ReadGrantRef } = {}) {
+    const liveCursor = this.feed.cursor;
     const limit = opts.limit ?? 50;
     const check = await this.beginContentRead(chatId, opts, limit);
-    return this.loadHistory(chatId, opts, limit, check, async () => { check(); await this.requireReadRoom(chatId); check(); });
+    return { ...await this.loadHistory(chatId, opts, limit, check, async () => { check(); await this.requireReadRoom(chatId); check(); }), liveCursor };
   }
 
   /** Date range retrieval scans bounded provider pages, then pages the local union.
@@ -909,6 +913,45 @@ export class KakaoSession {
     return this.inbox.ack(input, check);
   }
 
+  /** Subscribe only to change signals; content still goes through the ordinary read tools. */
+  private assertMessageWatch(chatId: string): void {
+    this.requireConnected();
+    if (!this.chats.get(chatId)) throw new KakaoError('NOT_FOUND', 'Room is no longer available');
+    this.roomAccess.check(chatId); this.assertRoomStillRead(chatId);
+  }
+  async authorizeMessageWatch(chatId: string): Promise<void> {
+    this.assertMessageWatch(chatId); await this.requireReadRoom(chatId); this.assertMessageWatch(chatId);
+  }
+
+  private readAccessChanged(chatId?: string): void {
+    for (const listener of [...this.readAccessListeners]) { try { listener(chatId); } catch { this.log('read access listener failed'); } }
+  }
+
+  async watchRoomMessages(chatId: string, changed: (code?: string) => void): Promise<() => void> {
+    await this.authorizeMessageWatch(chatId);
+    this.assertMessageWatch(chatId);
+    if (this.readAccessListeners.size >= 64) throw new KakaoError('RATE_LIMITED', 'Message subscription limit reached');
+    let closed = false, queued = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stop = () => { if (closed) return; closed = true; unfeed(); this.readAccessListeners.delete(access); if (timer) clearInterval(timer); };
+    const check = () => {
+      if (closed) return;
+      try { this.assertMessageWatch(chatId); }
+      catch (e) { stop(); changed(toKakaoError(e).code); }
+    };
+    const signal = () => {
+      if (closed || queued) return; queued = true;
+      queueMicrotask(() => { queued = false; check(); if (!closed) changed(); });
+    };
+    const access = (id?: string) => { if (id === undefined || id === chatId) check(); };
+    const unfeed = this.feed.onMessage(id => { if (id === chatId) signal(); });
+    this.readAccessListeners.add(access);
+    // Only expiring/scheduled rules need a clock check. Idle trust subscriptions have no timer.
+    const rule = this.roomAccess.rule(chatId);
+    if (rule.expiresAt || rule.mode === 'scheduled') { timer = setInterval(check, 1000); timer.unref(); }
+    return stop;
+  }
+
   /** Global transport head is metadata, not a durable content-delivery checkpoint. */
   get cursor(): number { return this.feed.cursor; }
 
@@ -1139,6 +1182,7 @@ export class KakaoSession {
   }
 
   stop(): void {
+    this.connected = false; this.readAccessChanged();
     this.session.close();
   }
 

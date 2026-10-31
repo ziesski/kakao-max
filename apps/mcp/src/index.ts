@@ -27,6 +27,7 @@ import { createApprovalServer } from './approval-server.ts';
 import { registerPermissionTools, registerNamedOperationTools, agentControlAdapter, grantViews, type GrantViews } from './tools/agent-operations.ts';
 import { loadOptionalModules, registerOptionalModules, checkToolGroups } from './optional-modules.ts';
 import { registerVaultTools } from './tools/vault.ts';
+import { registerMessageResources } from './message-resources.ts';
 import { serverInstructions } from './instructions.ts';
 
 const kakao = new KakaoSession();
@@ -55,6 +56,7 @@ const operationEngine = () => ready(agentOperationEngine, 'Agent operation engin
 
 registerCoreReadTools(server, { kakao, policy, config: kakao.config, groups, grants: () => grants, engine: operationEngine, friendAdds: () => friendAddLimit });
 registerChatDiscoveryTools(server, kakao);
+registerMessageResources(server, kakao, policy);
 registerAgentMessageTools(server, () => ready(agentSendService, 'Agent message service'));
 registerAgentPublicationTools(server, () => ready(agentPublicationService, 'Agent publication service'));
 registerAgentMutationTools(server, () => ready(agentMutationService, 'Agent mutation service'));

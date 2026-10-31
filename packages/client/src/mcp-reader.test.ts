@@ -130,3 +130,21 @@ test('only explicit live read receipts are omitted; malformed message identities
   f.set({ messages: [{ type: -1, raw: { isReadReceipt: true } }] });
   await assert.rejects(f.reader.history('2'), { code: 'INVALID_RESPONSE' });
 });
+
+test('late notification generations cannot affect a replacement room subscription', async () => {
+  let notify!: (method: string, params: Record<string, any>) => void, generation = 0;
+  const client: ToolClient = {
+    async callTool() { throw new Error('no content read in this test'); },
+    async request(method) { return method === 'resources/subscribe' ? { _meta: { subscriptionId: String(++generation) } } : {}; },
+    onNotification(listener) { notify = listener; return () => {}; }
+  };
+  const reader = new McpConversationReader(client); let changed = 0, failed = 0;
+  const first = await reader.watch!('2', () => { changed++; }, () => { failed++; }); first();
+  const second = await reader.watch!('2', () => { changed++; }, () => { failed++; });
+  notify('notifications/resources/updated', { uri: 'kakao://rooms/2/messages', _meta: { subscriptionId: '1', error: { code: 'POLICY_DENIED' } } });
+  assert.equal(changed, 0); assert.equal(failed, 0);
+  notify('notifications/resources/updated', { uri: 'kakao://rooms/3/messages', _meta: { subscriptionId: '2' } });
+  assert.equal(changed, 0);
+  notify('notifications/resources/updated', { uri: 'kakao://rooms/2/messages', _meta: { subscriptionId: '2' } });
+  assert.equal(changed, 1); second();
+});

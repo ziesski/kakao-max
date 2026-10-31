@@ -173,7 +173,7 @@ export function registerCoreReadTools(server: McpStdioServer, deps: {
       if (mode === 'recent') {
         const since = num(args.sinceSeq, 0);
         const messages = await kakao.recentMessages(since, chatId, grant);
-        return markUntrusted({ cursor: messages.at(-1)?.seq ?? since, messages });
+        return markUntrusted({ cursor: messages.at(-1)?.seq ?? since, messages, hasMore: messages.length >= (kakao.getRoomAccess(chatId).rule.maxMessages ?? 50) });
       }
       if (mode === 'wait') {
         const since = num(args.sinceSeq, kakao.cursor);

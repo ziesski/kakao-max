@@ -225,3 +225,15 @@ test('read-limit failure followed by send keeps old messages and the paused-refr
   assert.equal(f.view.polling, false);
   assert.equal(f.calls.filter(c => c.name === 'send_message').length, 1);
 });
+
+test('reconnection refreshes a live view but never resumes an explicitly stopped read', async () => {
+  const f = fixture(); await open(f);
+  f.view.connectionLost(Object.assign(new Error('fixture disconnected'), { code: 'NOT_CONNECTED' }));
+  await f.view.reconnected(); assert.equal(f.view.polling, true);
+  f.view.polling = false; f.view.conversation.stopUpdates();
+  const before = f.calls.filter(c => c.name === 'history').length;
+  f.view.connectionLost(Object.assign(new Error('fixture disconnected'), { code: 'NOT_CONNECTED' }));
+  await f.view.reconnected();
+  assert.equal(f.view.polling, false); assert.equal(f.calls.filter(c => c.name === 'history').length, before);
+  assert.equal(f.calls.filter(c => c.name === 'send_message').length, 0);
+});

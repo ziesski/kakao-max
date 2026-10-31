@@ -172,3 +172,45 @@ test('temporary read failures retain the last view until a successful explicit r
     assert.equal(f.conversation.live, true); assert.equal(f.conversation.readError, undefined);
   }
 });
+
+test('events during an in-flight update are drained without idle reads or duplicate messages', async () => {
+  const f = fixture(); let notify!: () => void, unsubscribe = 0, updates = 0;
+  f.reader.watch = async (_room, changed) => { notify = changed; return () => { unsubscribe++; }; };
+  f.reader.updates = async () => { updates++; return { messages: [m(11)], removedIds: [], reset: false, cursor: 1 }; };
+  await f.conversation.start(); await f.conversation.open('1');
+  await new Promise(resolve => setImmediate(resolve));
+  const idle = updates; await new Promise(resolve => setImmediate(resolve)); assert.equal(updates, idle);
+  let finish!: (value: any) => void;
+  f.reader.updates = () => { updates++; return new Promise(resolve => { finish = resolve; }); };
+  notify(); notify();
+  f.reader.updates = async () => { updates++; return { messages: [m(12)], removedIds: [], reset: false, cursor: 3 }; };
+  notify(); finish({ messages: [m(11), m(12)], removedIds: [], reset: false, cursor: 2 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10', '11', '12']);
+  assert.equal(updates, idle + 2);
+  f.conversation.close(); assert.equal(unsubscribe, 1);
+  notify(); await new Promise(resolve => setImmediate(resolve)); assert.equal(updates, idle + 2);
+});
+
+test('bounded update pages drain completely after one event', async () => {
+  const f = fixture(); let notify!: () => void, calls = 0;
+  f.reader.watch = async (_room, changed) => { notify = changed; return () => {}; };
+  f.reader.updates = async () => ({ messages: [], removedIds: [], reset: false, cursor: 0 });
+  await f.conversation.start(); await f.conversation.open('1'); await new Promise(resolve => setImmediate(resolve));
+  f.reader.updates = async () => { calls++; return { messages: [m(10 + calls)], removedIds: [], reset: false, cursor: calls, more: calls < 3 }; };
+  notify(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 3); assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10', '11', '12', '13']); f.conversation.close();
+});
+
+test('subscription revocation invalidates a content response already in flight', async () => {
+  const f = fixture(); let notify!: () => void, revoke!: (error: Error) => void;
+  f.reader.watch = async (_room, changed, failed) => { notify = changed; revoke = failed; return () => {}; };
+  f.reader.updates = async () => ({ messages: [], removedIds: [], reset: false });
+  await f.conversation.start(); await f.conversation.open('1'); await new Promise(resolve => setImmediate(resolve));
+  let finish!: (value: any) => void;
+  f.reader.updates = () => new Promise(resolve => { finish = resolve; }); notify();
+  revoke(Object.assign(new Error('fixture revoked'), { code: 'POLICY_DENIED' }));
+  finish({ messages: [m(99, 'must stay hidden')], removedIds: [], reset: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.conversation.live, false); assert.deepEqual(f.conversation.messages, []); f.conversation.close();
+});

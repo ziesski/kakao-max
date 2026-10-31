@@ -36,18 +36,50 @@ export class Conversation {
   private generation = 0;
   private pollRequest?: { generation: number; promise: Promise<void> };
   private closed = false;
+  private unwatch?: () => void;
+  private dirty = false;
+  private draining = false;
+  private stopWatch(): void { this.unwatch?.(); this.unwatch = undefined; this.dirty = false; }
+  stopUpdates(): void { this.stopWatch(); this._live = false; }
+  disconnected(error: Error): void { this.failRead(error); }
+  private queueUpdate(generation: number): void {
+    if (generation !== this.generation || this.closed || !this._live) return;
+    this.dirty = true;
+    if (this.draining) return;
+    this.draining = true;
+    void (async () => {
+      try {
+        while (this.dirty && generation === this.generation && this._live && !this.closed) {
+          this.dirty = false;
+          try { await this.poll(); } catch { break; }
+        }
+      } finally { this.draining = false; if (this.dirty && this._live && !this.closed) this.queueUpdate(this.generation); }
+    })();
+  }
+  private async startWatch(generation: number): Promise<void> {
+    if (!this._active || !this.reader.watch || !this.watchAllowed()) return;
+    const stop = await this.reader.watch(this._active.id, () => this.queueUpdate(generation), error => {
+      if (generation === this.generation && !this.closed) this.failRead(error);
+    });
+    if (generation !== this.generation || this.closed || !this._live) { stop(); return; }
+    this.unwatch = stop;
+    // One catch-up after subscribing closes the history/subscribe race; never an idle timer.
+    this.queueUpdate(generation);
+  }
+
+  private readonly watchAllowed: () => boolean;
   private readonly canOpen: (room: ConversationRoom) => boolean;
   private readonly changed: () => void;
 
-  constructor(reader: ConversationReader, writer: MessageWriter, changed: () => void, canOpen: (room: ConversationRoom) => boolean = () => true) {
-    this.reader = reader; this.writer = writer; this.changed = changed; this.canOpen = canOpen;
+  constructor(reader: ConversationReader, writer: MessageWriter, changed: () => void, canOpen: (room: ConversationRoom) => boolean = () => true, watchAllowed: () => boolean = () => true) {
+    this.reader = reader; this.writer = writer; this.changed = changed; this.canOpen = canOpen; this.watchAllowed = watchAllowed;
   }
   async start(): Promise<void> {
     const [status, writer] = await Promise.all([this.reader.status(), this.writer.identity()]);
     if (!status.connected || !writer.connected) throw new ConversationError('NOT_CONNECTED', '카카오톡 연결이 끊겨 있습니다.');
-    if (!validId(status.userId) || writer.userId !== status.userId) throw new ConversationError('ACCOUNT_MISMATCH', '조회와 전송 연결의 계정이 일치하지 않습니다. 연결 설정을 확인하세요.');
+    if (!validId(status.userId) || writer.userId !== status.userId) { const error = new ConversationError('ACCOUNT_MISMATCH', '조회와 전송 연결의 계정이 일치하지 않습니다. 연결 설정을 확인하세요.'); this.failRead(error); throw error; }
     if (this.closed) return;
-    if (this._userId && status.userId !== this._userId) throw new ConversationError('ACCOUNT_MISMATCH', '계정이 변경되었습니다. 새 화면에서 다시 연결하세요.');
+    if (this._userId && status.userId !== this._userId) { const error = new ConversationError('ACCOUNT_MISMATCH', '계정이 변경되었습니다. 새 화면에서 다시 연결하세요.'); this.failRead(error); throw error; }
     this._connected = true; this._userId = status.userId; this._mode = status.mode;
     await this.refreshRooms();
   }
@@ -58,6 +90,7 @@ export class Conversation {
   }
   async open(roomId: string): Promise<void> {
     if (!this._connected || this.closed) throw new ConversationError('NOT_CONNECTED', '먼저 계정 연결을 확인하세요.');
+    this.stopWatch();
     const generation = ++this.generation;
     this.requestedRoomId = undefined;
     this._active = undefined; this._messages = []; this._live = false; this._readError = undefined; this.changed();
@@ -67,7 +100,8 @@ export class Conversation {
     try {
       const result = await this.reader.history(room.id);
       if (this.closed || generation !== this.generation) return;
-      this.cursor = 0; this._active = room; this.merge(result.messages, [], true); this._live = true; this.changed();
+      this.cursor = result.cursor ?? 0; this._active = room; this.merge(result.messages, [], true); this._live = true; this.changed();
+      await this.startWatch(generation);
     } catch (e) { if (generation === this.generation) this.failRead(e); throw e; }
   }
   async refresh(): Promise<void> {
@@ -77,11 +111,13 @@ export class Conversation {
       else await this.refreshRooms();
       return;
     }
+    this.stopWatch();
     const roomId = this._active.id, generation = ++this.generation;
     try {
       const result = await this.reader.history(roomId);
       if (this.closed || generation !== this.generation) return;
-      this.cursor = 0; this.merge(result.messages, [], true); this._live = true; this._readError = undefined; this.changed();
+      this.cursor = result.cursor ?? 0; this.merge(result.messages, [], true); this._live = true; this._readError = undefined; this.changed();
+      await this.startWatch(generation);
     } catch (e) { if (generation === this.generation) this.failRead(e); throw e; }
   }
   async poll(): Promise<void> {
@@ -95,12 +131,15 @@ export class Conversation {
         if (this.closed || generation !== this.generation) return;
         this.merge(result.messages, result.removedIds, result.reset);
         this.cursor = result.cursor ?? this.cursor;
+        if (result.more) this.dirty = true;
       } catch (e) { if (generation === this.generation) this.failRead(e); throw e; }
     })();
     this.pollRequest = { generation, promise };
     try { await promise; } finally { if (this.pollRequest?.promise === promise) this.pollRequest = undefined; }
   }
   private failRead(error: unknown): void {
+    this.generation++;
+    this.stopWatch();
     this._live = false;
     const code = (error as { code?: unknown })?.code;
     // Keep the last authorized view on transport/budget failures. Permission,
@@ -147,5 +186,5 @@ export class Conversation {
     }
     this.changed();
   }
-  close(): void { this.closed = true; this.generation++; this._active = undefined; this.requestedRoomId = undefined; this._messages = []; this._rooms = []; this._userId = undefined; this._connected = false; this._live = false; }
+  close(): void { this.stopWatch(); this.closed = true; this.generation++; this._active = undefined; this.requestedRoomId = undefined; this._messages = []; this._rooms = []; this._userId = undefined; this._connected = false; this._live = false; }
 }

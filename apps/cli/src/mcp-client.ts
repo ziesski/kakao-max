@@ -48,6 +48,12 @@ export class McpClient {
   private readonly timeoutMs: number;
   private readonly onElicitation?: ElicitationHandler;
   private asking = false;
+  private readonly notifications = new Set<(method: string, params: Record<string, any>) => void>();
+  private readonly disconnects = new Set<(error: Error) => void>();
+  get connected(): boolean { return !!this.socket && !this.socket.destroyed; }
+  onNotification(listener: (method: string, params: Record<string, any>) => void): () => void { this.notifications.add(listener); return () => { this.notifications.delete(listener); }; }
+  onDisconnect(listener: (error: Error) => void): () => void { this.disconnects.add(listener); return () => { this.disconnects.delete(listener); }; }
+
 
   constructor(opts: { host: string; port: number; timeoutMs?: number; onElicitation?: ElicitationHandler }) {
     this.host = opts.host;
@@ -57,33 +63,41 @@ export class McpClient {
   }
 
   async connect(): Promise<void> {
+    if (this.connected) throw new Error('MCP client is already connected');
     await new Promise<void>((resolve, reject) => {
-      const s = net.connect(this.port, this.host, () => resolve());
+      const s = net.connect(this.port, this.host, () => { s.setNoDelay(true); s.setTimeout(0); resolve(); });
+      s.setTimeout(10000, () => s.destroy(new Error('MCP connection timed out')));
       s.once('error', reject);
       this.socket = s;
     });
     const s = this.socket!;
-    s.on('error', (e) => this.failAll(e));
-    s.on('close', () => this.failAll(new Error('MCP daemon closed the connection')));
+    s.on('error', (e) => { if (s === this.socket) this.failAll(Object.assign(e, { code: 'NETWORK' })); });
+    s.on('close', () => {
+      if (s !== this.socket) return;
+      this.socket = undefined;
+      const error = Object.assign(new Error('MCP daemon closed the connection'), { code: 'NOT_CONNECTED' });
+      this.failAll(error);
+      for (const listener of [...this.disconnects]) listener(error);
+    });
     // readline re-emits socket errors, already reported through failAll above.
     readline.createInterface({ input: s }).on('error', () => {}).on('line', (line) => this.onLine(line));
-    await this.request('initialize', {
+    try { await this.request('initialize', {
       clientInfo: { name: 'kakao-max-cli', version: '0.1.0' },
       ...(this.onElicitation ? { protocolVersion: '2025-11-25', capabilities: { elicitation: { form: {} } } } : {})
-    });
+    }, 10000); } catch (e) { this.close(); throw e; }
   }
 
   /** Raw JSON-RPC request; rejects on a JSON-RPC error or timeout. */
-  request(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  request(method: string, params: Record<string, unknown> = {}, timeoutMs = this.timeoutMs): Promise<any> {
     return new Promise((resolve, reject) => {
-      if (!this.socket) return reject(new Error('MCP client is not connected'));
+      if (!this.connected) return reject(Object.assign(new Error('MCP client is not connected'), { code: 'NOT_CONNECTED' }));
       const id = ++this.reqId;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`MCP request ${method} timed out after ${this.timeoutMs}ms`));
-      }, this.timeoutMs);
+        reject(Object.assign(new Error(`MCP request ${method} timed out after ${timeoutMs}ms`), { code: 'TIMEOUT' }));
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.socket.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      this.socket!.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
   }
 
@@ -105,8 +119,8 @@ export class McpClient {
   }
 
   close(): void {
-    this.socket?.destroy();
-    this.socket = undefined;
+    const socket = this.socket; this.socket = undefined; socket?.destroy();
+    this.failAll(Object.assign(new Error('MCP client closed'), { code: 'NOT_CONNECTED' }));
   }
 
   private onLine(line: string): void {
@@ -132,11 +146,15 @@ export class McpClient {
       }).finally(() => { this.asking = false; });
       return;
     }
+    if (typeof msg.method === 'string' && msg.id === undefined) {
+      for (const listener of [...this.notifications]) listener(msg.method, msg.params ?? {});
+      return;
+    }
     const p = msg.id != null ? this.pending.get(msg.id) : undefined;
     if (!p) return;
     this.pending.delete(msg.id);
     clearTimeout(p.timer);
-    if (msg.error) p.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+    if (msg.error) p.reject(Object.assign(new Error(msg.error.message || 'MCP request failed'), { code: msg.error.data?.code ?? (msg.error.code === -32601 ? 'NOT_SUPPORTED' : 'INVALID_RESPONSE') }));
     else p.resolve(msg.result);
   }
 

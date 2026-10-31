@@ -5,7 +5,7 @@
 // each message is a single UTF-8 line on stdin/stdout with no embedded newlines.
 // We implement just enough of the spec for a tools-only server — `initialize`,
 // `tools/list`, `tools/call`, `ping`, and the empty `resources`/`prompts` lists —
-// so any MCP client (Claude Desktop, Claude Code, the Agent SDK, etc.) can drive
+// plus authorized content-free resource change subscriptions, so any MCP client (Claude Desktop, Claude Code, the Agent SDK, etc.) can drive
 // the live KakaoTalk session. Logs MUST go to stderr; stdout is the wire.
 //
 // Dual-era (2026-07-28 "Versioning: Backward Compatibility"): a connection that opens with
@@ -35,7 +35,13 @@ const UNSUPPORTED_PROTOCOL_VERSION = -32022;
 // The tool list only changes on restart; a short hint keeps clients from polling.
 const LIST_CACHE = { ttlMs: 300_000, cacheScope: 'private' } as const;
 /** Per-connection era: `initialize` pins legacy semantics for the rest of that connection. */
-interface Connection { legacy: boolean; version?: string; client?: ClientContext;
+export interface ResourceSubscriptions {
+  templates: Array<{ uriTemplate: string; name: string; description: string; mimeType: string }>;
+  read(uri: string): Promise<unknown>;
+  subscribe(uri: string, changed: (code?: string) => void): Promise<() => void>;
+}
+interface Subscription { id: string; ready?: boolean; dispose(): void; }
+interface Connection { legacy: boolean; closed?: boolean; subscriptions?: Map<string, Subscription>; version?: string; client?: ClientContext;
   responses?: Map<string | number, (response: unknown) => void>;
   requestInput?: (params: Record<string, unknown>) => Promise<unknown>; }
 /** Per-request modern context; undefined for legacy requests. */
@@ -108,6 +114,8 @@ export class McpStdioServer {
   private readonly info: McpServerInfo;
   private activeTools = 0;
   private activeLargeTools = 0;
+  private resources?: ResourceSubscriptions;
+  setResourceSubscriptions(resources: ResourceSubscriptions): void { this.resources = resources; }
   private clientApproval: ClientApprovalGate | undefined;
   private readonly groups: ReadonlySet<McpToolGroup>;
 
@@ -142,14 +150,19 @@ export class McpStdioServer {
    */
   serveConnection(input: Readable, output: Writable, onClose?: () => void): void {
     let closed = false, inputEnded = false, notified = false, pending = 0;
-    const connection: Connection = { legacy: false, responses: new Map() };
+    const connection: Connection = { legacy: false, responses: new Map(), subscriptions: new Map() };
+    const cancelSubscriptions = () => {
+      connection.closed = true;
+      for (const subscription of connection.subscriptions!.values()) subscription.dispose();
+      connection.subscriptions!.clear();
+    };
     const cancelDialogs = () => { for (const resolve of connection.responses!.values()) resolve({ action: 'cancel' }); connection.responses!.clear(); };
     let fragments: Buffer[] = [], size = 0;
     const finish = () => {
       if (inputEnded && pending === 0 && !notified) { notified = true; onClose?.(); }
     };
     const stop = () => {
-      closed = true; fragments = []; size = 0; cancelDialogs();
+      closed = true; fragments = []; size = 0; cancelDialogs(); cancelSubscriptions();
       input.destroy();
     };
     const write = (obj: unknown): void => {
@@ -229,12 +242,13 @@ export class McpStdioServer {
       if (inputEnded) return;
       // As with readline, accept a bounded final line without a trailing newline.
       if (!closed && size) line(Buffer.concat(fragments, size));
-      fragments = []; size = 0; inputEnded = true; cancelDialogs(); finish();
+      fragments = []; size = 0; inputEnded = true; cancelDialogs(); cancelSubscriptions(); finish();
     };
     input.on('end', end);
     input.on('close', end);
     input.on('error', () => { this.log('MCP input stream failed'); stop(); });
     output.on('error', () => { this.log('MCP output stream failed'); stop(); });
+    output.on('close', stop);
   }
 
   private log(line: string): void {
@@ -298,10 +312,12 @@ export class McpStdioServer {
       switch (method) {
         case 'server/discover':
           return this.reply(write, id, { resultType: 'complete', supportedVersions: [...MODERN_PROTOCOL_VERSIONS],
-            capabilities: { tools: { listChanged: false } }, ...(this.info.instructions ? { instructions: this.info.instructions } : {}),
+            capabilities: { tools: { listChanged: false }, ...(this.resources ? { resources: { subscribe: false, listChanged: false } } : {}) }, ...(this.info.instructions ? { instructions: this.info.instructions } : {}),
             ...LIST_CACHE, _meta: { [META.server]: { name: this.info.name, version: this.info.version } } });
         case 'initialize': {
           if (connection.responses?.size) return this.error(write, id, -32600, 'Cannot reinitialize while approval is pending');
+          for (const subscription of connection.subscriptions?.values() ?? []) subscription.dispose();
+          connection.subscriptions?.clear();
           connection.legacy = true;
           const requested = params?.protocolVersion;
           const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.has(requested)
@@ -315,7 +331,7 @@ export class McpStdioServer {
           return this.reply(write, id, {
             protocolVersion,
             serverInfo: { name: this.info.name, version: this.info.version },
-            capabilities: { tools: { listChanged: false } },
+            capabilities: { tools: { listChanged: false }, ...(this.resources ? { resources: { subscribe: true, listChanged: false } } : {}) },
             ...(this.info.instructions ? { instructions: this.info.instructions } : {})
           });
         }
@@ -337,6 +353,55 @@ export class McpStdioServer {
             ...(modern ? LIST_CACHE : {})
           }));
         }
+        case 'resources/subscribe': {
+          if (!this.resources || !connection.legacy || connection.closed || !connection.subscriptions) return this.error(write, id, -32601, 'Resource subscriptions require an initialized connection');
+          const uri = params?.uri;
+          if (typeof uri !== 'string' || uri.length > 256) return this.error(write, id, -32602, 'Invalid resource URI');
+          const existing = connection.subscriptions.get(uri);
+          if (existing) {
+            if (!existing.ready) return this.error(write, id, -32000, 'Subscription authorization is pending', { code: 'RATE_LIMITED' });
+            return this.reply(write, id, { _meta: { subscriptionId: existing.id } });
+          }
+          if (connection.subscriptions.size >= 1) return this.error(write, id, -32000, 'One room subscription per connection', { code: 'RATE_LIMITED' });
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          let detach = () => {};
+          const entry: Subscription = { id: randomUUID(), dispose: () => { if (timer) clearTimeout(timer); detach(); } };
+          connection.subscriptions.set(uri, entry);
+          const notify = (code?: string) => {
+            if (connection.closed || connection.subscriptions?.get(uri) !== entry) return;
+            if (timer) clearTimeout(timer);
+            // Coalesce a burst without a polling timer; no body crosses this notification.
+            timer = setTimeout(() => {
+              timer = undefined;
+              if (connection.closed || connection.subscriptions?.get(uri) !== entry) return;
+              if (code) { connection.subscriptions.delete(uri); entry.dispose(); }
+              write({ jsonrpc: '2.0', method: 'notifications/resources/updated', params: { uri,
+                _meta: { subscriptionId: entry.id, ...(code ? { error: { code } } : {}) } } });
+            }, 0);
+          };
+          try {
+            detach = await this.resources.subscribe(uri, notify);
+            if (connection.closed || connection.subscriptions.get(uri) !== entry) { detach(); return this.reply(write, id, {}); }
+            entry.ready = true;
+            return this.reply(write, id, { _meta: { subscriptionId: entry.id } });
+          } catch (e) {
+            connection.subscriptions.delete(uri); entry.dispose();
+            const error = toKakaoError(e);
+            return this.error(write, id, -32000, error.message, { code: error.code });
+          }
+        }
+        case 'resources/unsubscribe': {
+          if (typeof params?.uri !== 'string') return this.error(write, id, -32602, 'Invalid resource URI');
+          connection.subscriptions?.get(params.uri)?.dispose(); connection.subscriptions?.delete(params.uri);
+          return this.reply(write, id, {});
+        }
+        case 'resources/read': {
+          if (!this.resources || typeof params?.uri !== 'string') return this.error(write, id, -32602, 'Invalid resource URI');
+          const value = await this.resources.read(params.uri);
+          return this.reply(write, id, { contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(value) }] });
+        }
+        case 'resources/templates/list':
+          return this.reply(write, id, this.result(modern, { resourceTemplates: this.resources?.templates ?? [] }));
         case 'resources/list':
           return this.reply(write, id, this.result(modern, { resources: [], ...(modern ? LIST_CACHE : {}) }));
         case 'prompts/list':

@@ -55,12 +55,17 @@ export class TerminalMessenger {
   private paste?: string;
   private sending = false;
   private readOnce = false;
+  private resumeReads = false;
   private revision = 0;
   private readonly redraw: () => void;
 
   constructor(reader: ConversationReader, writer: MessageWriter, options: DisplayOptions, redraw: () => void) {
     this.options = options; this.redraw = redraw; this.presentation = new ConversationView(options);
-    this.conversation = new Conversation(reader, writer, () => { this.revision++; }, room => this.presentation.canOpen(room));
+    this.conversation = new Conversation(reader, writer, () => {
+      this.revision++;
+      if (this.conversation.readError && !this.busy) { this.status = conversationError(this.conversation.readError, this.options.demo); this.polling = false; }
+      if (!this.busy && !this.closed) this.redraw();
+    }, room => this.presentation.canOpen(room), () => !this.readOnce);
   }
   get filtered() {
     return this.conversation.rooms.map(r => ({ id: r.id, label: this.presentation.label(r), unread: r.unreadCount, openable: this.presentation.canOpen(r) }))
@@ -69,6 +74,21 @@ export class TerminalMessenger {
   private get currentTitle(): string | undefined { return this.conversation.active && this.presentation.label(this.conversation.active); }
   async start(): Promise<void> {
     await this.work(async () => { await this.conversation.start(); this.presentation.update(this.conversation.rooms); this.status = '방 이름을 검색하거나 방향키로 선택하세요.'; });
+  }
+  connectionLost(error: Error): void {
+    const code = (this.conversation.readError as { code?: string })?.code ?? '';
+    this.resumeReads = !this.readOnce && (this.polling && this.conversation.live || this.resumeReads && ['NETWORK', 'TIMEOUT', 'NOT_CONNECTED'].includes(code));
+    this.approval?.resolve({ action: 'cancel' }); this.approval = undefined;
+    this.conversation.disconnected(error); this.status = '연결 끊김 · 재연결 중… · 전송은 자동 재시도하지 않습니다.'; this.redraw();
+  }
+  async reconnected(): Promise<void> {
+    await this.work(async () => {
+      await this.conversation.start(); this.presentation.update(this.conversation.rooms);
+      if (this.resumeReads) await this.conversation.refresh();
+      this.polling = this.resumeReads && this.conversation.live;
+      this.status = this.polling ? '재연결됨 · 최근 대화 재조회 · 이벤트 수신 중' : '재연결됨 · 자동 갱신 중지 · Ctrl+R로 직접 재조회';
+      if (this.readOnce) this.pauseAfterOneRead();
+    });
   }
   private async work(job: () => Promise<void>, quiet = false): Promise<void> {
     if (this.busy || this.closed) return;
@@ -86,6 +106,7 @@ export class TerminalMessenger {
   }
 
   private pauseAfterOneRead(): void {
+    this.resumeReads = false; this.conversation.stopUpdates();
     this.polling = false; this.status = '이번 조회만 허용했습니다. 자동 갱신 중지 · Ctrl+R로 다시 조회';
   }
 
@@ -140,7 +161,8 @@ export class TerminalMessenger {
         else await this.conversation.refresh();
         this.presentation.update(this.conversation.rooms);
         this.polling = !this.status.startsWith('오류:');
-        if (this.polling) this.status = '연결됨 · 새 메시지는 약 2초마다 확인합니다.';
+        this.resumeReads = this.polling && !this.readOnce;
+        if (this.polling) this.status = '연결됨 · 새 메시지는 도착 시 바로 갱신합니다.';
         if (this.readOnce) this.pauseAfterOneRead();
       });
     } else if (this.focus === 'rooms' && (key.name === 'up' || key.name === 'down')) {
@@ -156,7 +178,7 @@ export class TerminalMessenger {
         await this.work(async () => {
           this.readOnce = false; this.scroll = 0; this.draft = { text: '', cursor: 0 }; this.status = '대화 불러오는 중…';
           await this.conversation.open(room.id);
-          if (this.currentTitle) { this.focus = 'chat'; this.polling = true; this.status = '연결됨 · 새 메시지는 약 2초마다 확인합니다.'; if (this.readOnce) this.pauseAfterOneRead(); }
+          if (this.currentTitle) { this.focus = 'chat'; this.polling = true; this.resumeReads = !this.readOnce; this.status = '연결됨 · 새 메시지는 도착 시 바로 갱신합니다.'; if (this.readOnce) this.pauseAfterOneRead(); }
         });
       } else if (this.draft.text.trim()) {
         const sent = this.draft.text;
@@ -278,15 +300,32 @@ export async function runTerminalMessenger(args: string[], endpoint: { host: str
   process.stdin.on('keypress', onKey); process.stdout.on('resize', render);
   process.on('SIGTERM', stop); process.on('SIGHUP', stop);
   process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?2004h');
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let reconnecting = false, started = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let resumeReconnect: (() => void) | undefined;
+  const unDisconnect = client.onDisconnect(error => {
+    if (!started || view.closed || reconnecting) return;
+    view.connectionLost(error); reconnecting = true;
+    void (async () => {
+      let delay = 1000;
+      try {
+        while (!view.closed) {
+          await new Promise<void>(resolve => { resumeReconnect = resolve; reconnectTimer = setTimeout(resolve, delay); });
+          if (view.closed) break;
+          try { await client.connect(); if (!view.closed) await view.reconnected(); if (!client.connected && !view.closed) throw new Error('Connection lost during recovery'); break; }
+          catch { delay = Math.min(delay * 2, 10000); }
+        }
+      } finally { reconnecting = false; }
+    })();
+  });
   try {
     render(); await client.connect(); await view.start();
-    timer = setInterval(() => { void view.poll(); }, 2000);
+    started = true;
     if (!view.closed) await exit;
   } catch (e) {
     throw new Error(conversationError(e, demo));
   } finally {
-    if (timer) clearInterval(timer);
+    unDisconnect(); if (reconnectTimer) clearTimeout(reconnectTimer); resumeReconnect?.();
     view.close(); client.close();
     process.stdin.off('keypress', onKey); process.stdout.off('resize', render);
     process.off('SIGTERM', stop); process.off('SIGHUP', stop);

@@ -163,7 +163,14 @@ test('unread policy errors explain the shared ask restriction', async () => {
   const f = fixture(); await open(f);
   f.receiveError(new McpToolError('read_messages', 'fixture', 'ROOM_NOT_READ'));
   await f.view.poll();
-  assert.ok(display(f.view).includes('ask 모드')); assert.equal(f.view.polling, false);
+  assert.equal(f.view.polling, false);
+  for (const [columns, rows] of [[72, 14], [80, 24], [110, 30]]) {
+    const screen = stripVTControlCharacters(f.view.render(columns, rows));
+    assert.ok(screen.includes('ask 모드'));
+    assert.ok(screen.includes('trust 모드'));
+    assert.ok(screen.split(/\r?\n/).length <= rows);
+    assert.ok(screen.split(/\r?\n/).every(row => terminalWidth(row) <= columns - 1));
+  }
 });
 
 test('Ctrl+R retries the room whose initial open failed after its read state changes', async () => {

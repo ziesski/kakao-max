@@ -418,7 +418,7 @@ test('wait rechecks unread state and revocation before returning an arriving mes
 test('content is refused when server counts are missing, become unread, or policy changes in flight', async () => {
   const { kakao, fake } = setup();
   fake.connect(); phoneRead(kakao);
-  fake.replies.request = [{ header: { status: 0 }, data: { chatDatas: [] } }];
+  fake.replies.request = [{ header: { status: 0 }, data: { chatDatas: [] } }, { header: { status: 0 }, data: {} }];
   await assert.rejects(kakao.searchMessages('fixture', { chatId: CHAT }), isCode('ROOM_NOT_READ'));
   phoneRead(kakao);
   fake.request = async () => {
@@ -708,6 +708,7 @@ test('open-room read receipt ACK preserves server unread and reports verificatio
 test('fresh metadata distinguishes missing/unknown rooms and does not erase a concurrent push', async () => {
   const { kakao, fake } = setup(); phoneRead(kakao);
   fake.replies.request = [ { header: { status: 0 }, data: { chatDatas: [] } },
+    { header: { status: 0 }, data: {} },
     { header: { status: 0 }, data: { chatDatas: [{ c: CHAT }] } } ];
   assert.equal((await kakao.inspectRoomReadState(CHAT)).reason, 'room_missing');
   assert.equal((await kakao.inspectRoomReadState(CHAT)).reason, 'unread_unknown');
@@ -849,4 +850,57 @@ test('a failed leave keeps the room permissions', async t => {
   fake.connect(); fake.replies.leave = [{ status: -500 }];
   await assert.rejects(kakao.leave(CHAT));
   assert.equal(kakao.getRoomAccess(CHAT).rule.mode, 'immediate'); assert.equal(calls, 0);
+});
+
+
+test('fresh exact metadata confirms a read room absent from the list without sending a read receipt', async () => {
+  const { kakao, fake } = setup();
+  fake.emit('connected', { endpoint: { host: 'fixture', port: 443 }, loginList: {
+    conversations: [{ id: CHAT, type: 'OD', unreadCount: 1, raw: {} }], raw: {} } });
+  fake.replies.request = [
+    { header: { status: 0 }, data: { chatDatas: [] } },
+    { header: { status: 0 }, data: { chatInfo: { chatId: Long.fromString(CHAT), newMessageCount: 0, invalidNewMessageCount: false } } }
+  ];
+  assert.deepEqual(await kakao.inspectRoomReadState(CHAT), {
+    confirmed: true, reason: 'confirmed_read', localUnreadCount: 1, serverUnreadCount: 0, source: 'chat_info'
+  });
+  assert.equal(kakao.listChats()[0].unreadCount, 0);
+  assert.deepEqual(fake.calls.filter(c => c.method === 'request').map(c => c.args[0]), ['LCHATLIST', 'CHATINFO']);
+  const detail = fake.calls.filter(c => c.method === 'request').at(-1)!;
+  assert.equal(String((detail.args[1] as any).chatId), CHAT);
+  assert.equal(fake.calls.some(c => ['markRead', 'chatLogs', 'sendText'].includes(c.method)), false);
+});
+
+test('missing-room fallback rejects invalid counts, unbound metadata and departed rooms', async () => {
+  for (const extra of [
+    { newMessageCount: 2, invalidNewMessageCount: false },
+    { newMessageCount: 0, invalidNewMessageCount: true },
+    { newMessageCount: 0 },
+    { newMessageCount: -1, invalidNewMessageCount: false },
+    { newMessageCount: 0.5, invalidNewMessageCount: false },
+    { newMessageCount: '0', invalidNewMessageCount: false },
+    { newMessageCount: 0, invalidNewMessageCount: false, chatId: '123' },
+    { newMessageCount: 0, invalidNewMessageCount: false, left: true }
+  ]) {
+    const { kakao, fake } = setup(); phoneRead(kakao);
+    fake.replies.request = [
+      { header: { status: 0 }, data: { chatDatas: [] } },
+      { header: { status: 0 }, data: { chatInfo: { chatId: CHAT, ...extra } } }
+    ];
+    assert.equal((await kakao.inspectRoomReadState(CHAT)).confirmed, false);
+  }
+});
+
+test('missing-room metadata refresh cannot erase a concurrent push or hide a server rejection', async () => {
+  const { kakao, fake } = setup(); phoneRead(kakao);
+  fake.request = async (method: string) => {
+    if (method === 'LCHATLIST') return { header: { status: 0 }, data: { chatDatas: [] } };
+    fake.emit('message', { chatId: CHAT, messageId: '100', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
+    return { header: { status: 0 }, data: { chatInfo: { chatId: CHAT, newMessageCount: 0, invalidNewMessageCount: false } } };
+  };
+  assert.equal((await kakao.inspectRoomReadState(CHAT)).reason, 'local_state_changed');
+  assert.equal(kakao.listChats()[0].unreadCount, 1);
+  fake.request = async (method: string) => method === 'LCHATLIST' ? { header: { status: 0 }, data: { chatDatas: [] } } :
+    { header: { status: -500 }, data: { status: -500 } };
+  await assert.rejects(kakao.inspectRoomReadState(CHAT), isCode('LOCO_STATUS'));
 });

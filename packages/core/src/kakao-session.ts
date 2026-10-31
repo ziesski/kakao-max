@@ -1170,16 +1170,29 @@ export class KakaoSession {
     const status = Number((pkt.data as any)?.status ?? pkt.header.status);
     if (status !== 0) throw locoStatusError('LCHATLIST', status);
     const room = parseLoginList((pkt.data ?? {}) as Record<string, any>).find(chat => chat.id === chatId);
-    const count = room?.unreadCount;
+    let count = room?.unreadCount;
+    let present = !!room;
+    let source: 'chat_info' | undefined;
+    if (!room) {
+      // A room learned from a push can be absent from the session's list snapshot.
+      // Ask for its exact metadata; absence never implies an unread count of zero.
+      const detail = await this.session.request('CHATINFO', { chatId: Long.fromString(chatId) });
+      const detailStatus = Number((detail.data as any)?.status ?? detail.header.status);
+      if (detailStatus !== 0) throw locoStatusError('CHATINFO', detailStatus);
+      const info = (detail.data as any)?.chatInfo;
+      present = !!info && String(info.chatId) === chatId && info.left !== true;
+      count = present && info.invalidNewMessageCount === false ? info.newMessageCount : undefined;
+      source = 'chat_info';
+    }
     const known = Number.isSafeInteger(count) && count! >= 0;
     const current = this.chats.get(chatId);
     // Do not overwrite a message push or another metadata update during the request.
     const unchanged = current?.maxLogId === head && current?.unreadCount === localUnreadCount;
     if (known && unchanged) this.chats.setUnread(chatId, count!);
-    const reason = !room ? 'room_missing' : !known ? 'unread_unknown' : count !== 0 ? 'server_unread' :
+    const reason = !present ? 'room_missing' : !known ? 'unread_unknown' : count !== 0 ? 'server_unread' :
       !unchanged ? 'local_state_changed' : 'confirmed_read';
     return { confirmed: reason === 'confirmed_read', reason, localUnreadCount,
-      serverUnreadCount: known ? count! : null };
+      serverUnreadCount: known ? count! : null, ...(source ? { source } : {}) };
   }
 
   private async requireReadRoom(chatId: string): Promise<void> {

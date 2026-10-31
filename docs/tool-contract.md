@@ -8,7 +8,7 @@
 | 도구 | 용도 |
 |---|---|
 | `get_status` | 연결, pause, 상한·속도 제한, 나와의 채팅 기본값, 친구 추가 하루 한도·오늘 사용량, 승인 수단, 활성 묶음, 권한 개수 |
-| `list_chats` | 방 목록; `chatId`로 상세·접근 규칙, `refresh`·`refreshReadState`로 metadata 갱신 |
+| `list_chats` | 방 목록; `chatId`로 상세·접근 규칙, `refresh`·`refreshReadState`로 metadata 갱신(목록에 없는 방은 정확한 방 metadata로 읽음 확인) |
 | `find_chat` | 제목·참여자·인원수 검색; 모호하거나 다음 페이지가 있으면 계속 확인 |
 | `list_friends` | 주소록 검색 |
 | `read_messages` | 한 방의 history/recent/wait/search; 날짜 범위는 from/to와 cursor로 페이지 조회. 닫힌 방이면 같은 호출에서 사람에게 묻습니다 |

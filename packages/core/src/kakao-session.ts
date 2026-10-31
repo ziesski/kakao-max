@@ -1153,8 +1153,10 @@ export class KakaoSession {
   /** Content is accessible only in an explicitly read room (ask mode). Never changes read state. */
   private assertRoomStillRead(chatId: string): void {
     if (!this.readStateRestricted()) return;
-    if (this.chats.get(chatId)?.unreadCount !== 0) {
-      throw new KakaoError('ROOM_NOT_READ', 'Content access requires a confirmed already-read room; unread or unknown rooms are blocked');
+    const count = this.chats.get(chatId)?.unreadCount;
+    if (count !== 0) {
+      throw new KakaoError('ROOM_NOT_READ', 'Content access requires a confirmed already-read room; unread or unknown rooms are blocked',
+        { details: { reason: Number.isSafeInteger(count) && count! > 0 ? 'local_unread' : 'unread_unknown' } });
     }
   }
 
@@ -1173,7 +1175,8 @@ export class KakaoSession {
     let count = room?.unreadCount;
     let present = !!room;
     let source: 'chat_info' | 'chat_info_watermark' | undefined;
-    let verification: { countValid: boolean; watermarkKnown: boolean; watermarkCoversHead: boolean } | undefined;
+    let verification: { countValid: boolean; countProvided: boolean; countValidityKnown: boolean; countMarkedInvalid: boolean;
+      watermarkKnown: boolean; watermarkCoversHead: boolean; serverHeadCoversLocal: boolean; accountSeenCoversServer: boolean } | undefined;
     if (!room) {
       // A room learned from a push can be absent from the session's list snapshot.
       // Ask for its exact metadata; absence never implies an unread count of zero.
@@ -1195,7 +1198,10 @@ export class KakaoSession {
       const countValid = Number.isSafeInteger(count) && count! >= 0;
       const watermarkKnown = latest !== undefined && seen !== undefined && localHead !== undefined;
       const watermarkCoversHead = watermarkKnown && latest! >= localHead! && seen! >= latest!;
-      verification = { countValid, watermarkKnown, watermarkCoversHead };
+      verification = { countValid, countProvided: info?.newMessageCount !== undefined,
+        countValidityKnown: typeof info?.invalidNewMessageCount === 'boolean', countMarkedInvalid: info?.invalidNewMessageCount === true,
+        watermarkKnown, watermarkCoversHead, serverHeadCoversLocal: latest !== undefined && localHead !== undefined && latest >= localHead,
+        accountSeenCoversServer: latest !== undefined && seen !== undefined && seen >= latest };
       // This is the account's own server read position, not another member's
       // DECUNREAD notification or an acknowledgement of our mark-read request.
       if (!countValid && watermarkCoversHead) { count = 0; source = 'chat_info_watermark'; }

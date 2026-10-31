@@ -863,7 +863,8 @@ test('fresh exact metadata confirms a read room absent from the list without sen
   ];
   assert.deepEqual(await kakao.inspectRoomReadState(CHAT), {
     confirmed: true, reason: 'confirmed_read', localUnreadCount: 1, serverUnreadCount: 0, source: 'chat_info',
-    verification: { countValid: true, watermarkKnown: false, watermarkCoversHead: false }
+    verification: { countValid: true, countProvided: true, countValidityKnown: true, countMarkedInvalid: false,
+      watermarkKnown: false, watermarkCoversHead: false, serverHeadCoversLocal: false, accountSeenCoversServer: false }
   });
   assert.equal(kakao.listChats()[0].unreadCount, 0);
   assert.deepEqual(fake.calls.filter(c => c.method === 'request').map(c => c.args[0]), ['LCHATLIST', 'CHATINFO']);
@@ -942,4 +943,15 @@ test('unknown, unsafe, stale or other-room watermarks never confirm a read room'
     assert.equal((await kakao.inspectRoomReadState(CHAT)).confirmed, false);
     assert.notEqual(kakao.listChats()[0].unreadCount, 0);
   }
+});
+
+test('unknown cached read state is distinguished from a positive unread estimate', async () => {
+  const { kakao, fake } = setup();
+  fake.emit('connected', { endpoint: { host: 'fixture', port: 443 }, loginList: {
+    conversations: [{ id: CHAT, type: 'OD', raw: {} }], raw: {} } });
+  await assert.rejects(kakao.getHistory(CHAT), (e: any) => e.code === 'ROOM_NOT_READ' && e.details.reason === 'unread_unknown');
+  assert.equal(fake.calls.length, 0);
+  phoneRead(kakao);
+  fake.emit('message', { chatId: CHAT, messageId: '100', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
+  await assert.rejects(kakao.getHistory(CHAT), (e: any) => e.code === 'ROOM_NOT_READ' && e.details.reason === 'local_unread');
 });

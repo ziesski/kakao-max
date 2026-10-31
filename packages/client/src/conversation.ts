@@ -15,6 +15,7 @@ export class Conversation {
   readonly writer: MessageWriter;
   private _rooms: ConversationRoom[] = [];
   private _active?: ConversationRoom;
+  private requestedRoomId?: string;
   private _messages: ConversationMessage[] = [];
   private _connected = false;
   private _userId?: string;
@@ -58,9 +59,11 @@ export class Conversation {
   async open(roomId: string): Promise<void> {
     if (!this._connected || this.closed) throw new ConversationError('NOT_CONNECTED', '먼저 계정 연결을 확인하세요.');
     const generation = ++this.generation;
+    this.requestedRoomId = undefined;
     this._active = undefined; this._messages = []; this._live = false; this._readError = undefined; this.changed();
     const room = this._rooms.find(r => r.id === roomId);
     if (!room || !this.canOpen(room)) throw new ConversationError('ROOM_NOT_AVAILABLE', '이 화면에서 열 수 없는 방입니다.');
+    this.requestedRoomId = room.id;
     try {
       const result = await this.reader.history(room.id);
       if (this.closed || generation !== this.generation) return;
@@ -69,7 +72,11 @@ export class Conversation {
   }
   async refresh(): Promise<void> {
     if (!this._connected || this.closed) throw new ConversationError('NOT_CONNECTED', '먼저 계정 연결을 확인하세요.');
-    if (!this._active) { await this.refreshRooms(); return; }
+    if (!this._active) {
+      if (this.requestedRoomId) await this.open(this.requestedRoomId);
+      else await this.refreshRooms();
+      return;
+    }
     const roomId = this._active.id, generation = ++this.generation;
     try {
       const result = await this.reader.history(roomId);
@@ -135,5 +142,5 @@ export class Conversation {
     }
     this.changed();
   }
-  close(): void { this.closed = true; this.generation++; this._active = undefined; this._messages = []; this._rooms = []; this._userId = undefined; this._connected = false; this._live = false; }
+  close(): void { this.closed = true; this.generation++; this._active = undefined; this.requestedRoomId = undefined; this._messages = []; this._rooms = []; this._userId = undefined; this._connected = false; this._live = false; }
 }

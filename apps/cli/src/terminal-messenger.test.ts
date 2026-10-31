@@ -165,3 +165,24 @@ test('unread policy errors explain the shared ask restriction', async () => {
   await f.view.poll();
   assert.ok(display(f.view).includes('ask 모드')); assert.equal(f.view.polling, false);
 });
+
+test('Ctrl+R retries the room whose initial open failed after its read state changes', async () => {
+  const f = fixture();
+  const history = f.reader.history;
+  let unread = true;
+  f.reader.history = async (...args) => {
+    if (unread) throw new McpToolError('read_messages', 'fixture unread', 'ROOM_NOT_READ');
+    return history(...args);
+  };
+  await f.view.start();
+  await f.view.key('공개 테스트방');
+  await f.view.key('', { name: 'return' });
+  assert.equal(f.view.conversation.active, undefined);
+  assert.equal(f.view.polling, false);
+  unread = false;
+  await f.view.key('', { ctrl: true, name: 'r' });
+  assert.deepEqual(f.view.conversation.active, f.view.conversation.rooms.find(room => room.id === '202'));
+  assert.equal(f.view.polling, true);
+  assert.ok(display(f.view).includes('fixture history'));
+  assert.equal(f.calls.filter(c => c.name === 'send_message').length, 0);
+});

@@ -27,6 +27,9 @@ export class McpConversationReader implements ConversationReader {
     return result.chats.map((r: any) => ({ id: r.id, title: r.title, type: r.type, memberCount: r.memberCount, unreadCount: r.unreadCount }));
   }
   async history(chatId: string, before?: string): ReturnType<ConversationReader['history']> {
+    // Phone reads do not push unread metadata to this device. Refresh the exact
+    // room before the daemon checks its cached unread count; this marks nothing read.
+    await this.client.callTool('list_chats', { chatId, refreshReadState: true });
     const result = await this.client.callTool('read_messages', { chatId, limit: CONVERSATION_LIMITS.history, ...(before ? { beforeLogId: before } : {}) });
     if (result.sync?.error || result.sync?.status !== undefined && ![0, -203].includes(result.sync.status)) throw new ConversationError('NETWORK', '대화를 가져오지 못했습니다. Ctrl+R로 다시 조회하세요.');
     const rows = messages(result.messages);

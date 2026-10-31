@@ -1172,7 +1172,8 @@ export class KakaoSession {
     const room = parseLoginList((pkt.data ?? {}) as Record<string, any>).find(chat => chat.id === chatId);
     let count = room?.unreadCount;
     let present = !!room;
-    let source: 'chat_info' | undefined;
+    let source: 'chat_info' | 'chat_info_watermark' | undefined;
+    let verification: { countValid: boolean; watermarkKnown: boolean; watermarkCoversHead: boolean } | undefined;
     if (!room) {
       // A room learned from a push can be absent from the session's list snapshot.
       // Ask for its exact metadata; absence never implies an unread count of zero.
@@ -1183,6 +1184,21 @@ export class KakaoSession {
       present = !!info && String(info.chatId) === chatId && info.left !== true;
       count = present && info.invalidNewMessageCount === false ? info.newMessageCount : undefined;
       source = 'chat_info';
+      const logId = (value: unknown): bigint | undefined => {
+        if (!(typeof value === 'string' || typeof value === 'number' && Number.isSafeInteger(value) || Long.isLong(value))) return;
+        const text = String(value);
+        return /^(0|[1-9]\d{0,18})$/.test(text) ? BigInt(text) : undefined;
+      };
+      const latest = present ? logId(info.lastLogId) : undefined;
+      const seen = present ? logId(info.lastSeenLogId) : undefined;
+      const localHead = logId(head);
+      const countValid = Number.isSafeInteger(count) && count! >= 0;
+      const watermarkKnown = latest !== undefined && seen !== undefined && localHead !== undefined;
+      const watermarkCoversHead = watermarkKnown && latest! >= localHead! && seen! >= latest!;
+      verification = { countValid, watermarkKnown, watermarkCoversHead };
+      // This is the account's own server read position, not another member's
+      // DECUNREAD notification or an acknowledgement of our mark-read request.
+      if (!countValid && watermarkCoversHead) { count = 0; source = 'chat_info_watermark'; }
     }
     const known = Number.isSafeInteger(count) && count! >= 0;
     const current = this.chats.get(chatId);
@@ -1192,7 +1208,7 @@ export class KakaoSession {
     const reason = !present ? 'room_missing' : !known ? 'unread_unknown' : count !== 0 ? 'server_unread' :
       !unchanged ? 'local_state_changed' : 'confirmed_read';
     return { confirmed: reason === 'confirmed_read', reason, localUnreadCount,
-      serverUnreadCount: known ? count! : null, ...(source ? { source } : {}) };
+      serverUnreadCount: known ? count! : null, ...(source ? { source, verification } : {}) };
   }
 
   private async requireReadRoom(chatId: string): Promise<void> {

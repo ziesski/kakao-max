@@ -193,3 +193,15 @@ test('Ctrl+R retries the room whose initial open failed after its read state cha
   assert.ok(display(f.view).includes('fixture history'));
   assert.equal(f.calls.filter(c => c.name === 'send_message').length, 0);
 });
+
+
+test('unknown read-state errors explain missing sync rather than claiming the person has not read', async () => {
+  const f = fixture(); await open(f);
+  f.receiveError(new McpToolError('read_messages', 'private provider detail', 'ROOM_NOT_READ', false, { reason: 'unread_unknown' }));
+  await f.view.poll();
+  const screen = display(f.view);
+  assert.ok(screen.includes('서버의 읽음 상태를 확인할 수 없습니다.'));
+  assert.ok(screen.includes('trust 모드'));
+  assert.ok(!screen.includes('안읽은 방은'));
+  assert.ok(!screen.includes('private provider detail'));
+});

@@ -60,7 +60,6 @@ AI가 대화에서 최종 약속을 찾아 요약하고, 실제 카카오톡 대
 </p>
 
 <p align="center">
-  <a href="assets/demos/summarize-demo.mp4"><strong>MP4로 보기 · 12초 →</strong></a><br>
   <sub>시연을 위해 작성한 예시 대화 · 실제 조회 및 전송 · 입력 4배속 / 처리 대기 8배속</sub>
 </p>
 
@@ -79,7 +78,6 @@ AI가 대화에서 최종 약속을 찾아 요약하고, 실제 카카오톡 대
 </p>
 
 <p align="center">
-  <a href="assets/demos/terminal-demo.mp4"><strong>MP4로 보기 · 10초 →</strong></a><br>
   <sub>시연용 대화 · 실제 송수신 · 입력 2~3배속 / 도착 장면 정상 속도 / 마지막 화면 정지</sub>
 </p>
 

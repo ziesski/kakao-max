@@ -205,3 +205,23 @@ test('unknown read-state errors explain missing sync rather than claiming the pe
   assert.ok(!screen.includes('안읽은 방은'));
   assert.ok(!screen.includes('private provider detail'));
 });
+
+
+test('read-limit failure followed by send keeps old messages and the paused-refresh warning', async () => {
+  const f = fixture(); await open(f);
+  f.receiveError(new McpToolError('read_messages', 'private budget detail', 'RATE_LIMITED'));
+  await f.view.poll();
+  assert.ok(display(f.view).includes('fixture history'));
+  assert.ok(display(f.view).includes('한도'));
+  const afterFailure = f.calls.length; await f.view.poll();
+  assert.equal(f.calls.length, afterFailure);
+  await f.view.key('fixture reply'); await f.view.key('', { name: 'return' });
+  const screen = display(f.view);
+  assert.ok(screen.includes('fixture history'));
+  assert.ok(screen.includes('fixture reply'));
+  assert.ok(screen.includes('전송 요청 처리 완료'));
+  assert.ok(screen.includes('자동 갱신 중지'));
+  assert.ok(!screen.includes('private budget detail'));
+  assert.equal(f.view.polling, false);
+  assert.equal(f.calls.filter(c => c.name === 'send_message').length, 1);
+});

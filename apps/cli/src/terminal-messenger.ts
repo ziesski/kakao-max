@@ -166,6 +166,9 @@ export class TerminalMessenger {
           try {
             await this.conversation.send(sent);
             this.status = '✓ 전송 요청 처리 완료 · 실제 도착은 카톡에서도 확인하세요.';
+            if (this.conversation.readError && !this.conversation.live) {
+              this.status += ' · 대화 자동 갱신 중지 · ' + conversationError(this.conversation.readError, this.options.demo);
+            }
             if (this.status.startsWith('✓')) { this.draft = { text: '', cursor: 0 }; this.scroll = 0; }
           } finally { this.sending = false; }
         });

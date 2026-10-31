@@ -3,6 +3,7 @@ const TRUST_MODE_HELP = 'trust 모드에서는 이 제한이 해제됩니다. �
 const MESSAGES: Record<string, string> = {
   ACCOUNT_MISMATCH: '조회와 전송 연결의 계정이 일치하지 않습니다. 메시지를 보내지 않았습니다. 연결 설정을 확인하세요.',
   NOT_CONNECTED: '연결이 끊겼습니다. 다시 연결한 뒤 대화를 조회하세요.',
+  RATE_LIMITED: '요청 한도에 도달했습니다. 자동 갱신 중지 · 한도 회복 후 Ctrl+R로 다시 조회하세요.',
   TIMEOUT: '대화 조회가 지연됐습니다. Ctrl+R로 다시 조회할 수 있습니다.',
   INVALID_RESPONSE: '대화 응답 형식을 확인할 수 없습니다. Ctrl+R로 다시 조회하고, 반복되면 오류를 점검하세요.',
   SEND_PENDING: '앞선 전송 결과를 먼저 확인하세요. 같은 내용을 새 요청으로 다시 보내지 마세요.',

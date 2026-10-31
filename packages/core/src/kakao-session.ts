@@ -1185,7 +1185,10 @@ export class KakaoSession {
       if (detailStatus !== 0) throw locoStatusError('CHATINFO', detailStatus);
       const info = (detail.data as any)?.chatInfo;
       present = !!info && String(info.chatId) === chatId && info.left !== true;
-      count = present && info.invalidNewMessageCount === false ? info.newMessageCount : undefined;
+      // False-valued optional flags can be omitted by the server. The count
+      // itself must still pass the nonnegative-safe-integer check below.
+      const countUsable = info?.invalidNewMessageCount === undefined || info?.invalidNewMessageCount === false;
+      count = present && countUsable ? info.newMessageCount : undefined;
       source = 'chat_info';
       const logId = (value: unknown): bigint | undefined => {
         if (!(typeof value === 'string' || typeof value === 'number' && Number.isSafeInteger(value) || Long.isLong(value))) return;

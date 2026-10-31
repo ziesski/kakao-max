@@ -877,7 +877,7 @@ test('missing-room fallback rejects invalid counts, unbound metadata and departe
   for (const extra of [
     { newMessageCount: 2, invalidNewMessageCount: false },
     { newMessageCount: 0, invalidNewMessageCount: true },
-    { newMessageCount: 0 },
+    { newMessageCount: 0, invalidNewMessageCount: 'false' },
     { newMessageCount: -1, invalidNewMessageCount: false },
     { newMessageCount: 0.5, invalidNewMessageCount: false },
     { newMessageCount: '0', invalidNewMessageCount: false },
@@ -954,4 +954,27 @@ test('unknown cached read state is distinguished from a positive unread estimate
   phoneRead(kakao);
   fake.emit('message', { chatId: CHAT, messageId: '100', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
   await assert.rejects(kakao.getHistory(CHAT), (e: any) => e.code === 'ROOM_NOT_READ' && e.details.reason === 'local_unread');
+});
+
+
+test('an omitted invalid-count flag preserves an explicit numeric count, never an absent or malformed count', async () => {
+  for (const [extra, confirmed, serverUnreadCount] of [
+    [{ newMessageCount: 0 }, true, 0],
+    [{ newMessageCount: 1 }, false, 1],
+    [{}, false, null],
+    [{ newMessageCount: null }, false, null],
+    [{ newMessageCount: '0' }, false, null],
+    [{ newMessageCount: -1 }, false, null],
+    [{ newMessageCount: 0, invalidNewMessageCount: true }, false, null],
+    [{ newMessageCount: 0, invalidNewMessageCount: null }, false, null]
+  ] as const) {
+    const { kakao, fake } = setup(); phoneRead(kakao);
+    fake.replies.request = [
+      { header: { status: 0 }, data: { chatDatas: [] } },
+      { header: { status: 0 }, data: { chatInfo: { chatId: CHAT, ...extra } } }
+    ];
+    const result = await kakao.inspectRoomReadState(CHAT);
+    assert.equal(result.confirmed, confirmed);
+    assert.equal(result.serverUnreadCount, serverUnreadCount);
+  }
 });

@@ -167,7 +167,9 @@ test('temporary read failures retain the last view until a successful explicit r
     f.setError(Object.assign(new Error('fixture unavailable'), { code }));
     await assert.rejects(f.conversation.refresh());
     assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10']);
-    f.setError(); f.setRows([m(11)]); await f.conversation.refresh();
+    f.setError(); f.setRows([m(11)]);
+    if (!f.conversation.connected) await f.conversation.start();
+    await f.conversation.refresh();
     assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['11']);
     assert.equal(f.conversation.live, true); assert.equal(f.conversation.readError, undefined);
   }

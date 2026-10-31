@@ -237,3 +237,14 @@ test('reconnection refreshes a live view but never resumes an explicitly stopped
   assert.equal(f.view.polling, false); assert.equal(f.calls.filter(c => c.name === 'history').length, before);
   assert.equal(f.calls.filter(c => c.name === 'send_message').length, 0);
 });
+
+test('a disconnected account remains unready until metadata reports its recovery', async () => {
+  const f = fixture(); await open(f);
+  const original = f.reader.status;
+  f.reader.status = async () => ({ connected: false, userId: '1' });
+  f.view.connectionLost(Object.assign(new Error('fixture account reconnect'), { code: 'NOT_CONNECTED' }));
+  await f.view.reconnected(); assert.equal(f.view.conversation.connected, false); assert.equal(f.view.polling, false);
+  f.reader.status = original; await f.view.reconnected();
+  assert.equal(f.view.conversation.connected, true); assert.equal(f.view.polling, true);
+  assert.equal(f.calls.filter(c => c.name === 'send_message').length, 0);
+});

@@ -158,7 +158,7 @@ export class TerminalMessenger {
       await this.work(async () => {
         this.status = '새로고침 중…'; this.readOnce = false;
         if (!this.conversation.connected) await this.conversation.start();
-        else await this.conversation.refresh();
+        await this.conversation.refresh();
         this.presentation.update(this.conversation.rooms);
         this.polling = !this.status.startsWith('오류:');
         this.resumeReads = this.polling && !this.readOnce;
@@ -303,20 +303,40 @@ export async function runTerminalMessenger(args: string[], endpoint: { host: str
   let reconnecting = false, started = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let resumeReconnect: (() => void) | undefined;
-  const unDisconnect = client.onDisconnect(error => {
+  const recover = (error: Error) => {
     if (!started || view.closed || reconnecting) return;
-    view.connectionLost(error); reconnecting = true;
+    reconnecting = true; view.connectionLost(error);
     void (async () => {
       let delay = 1000;
       try {
         while (!view.closed) {
           await new Promise<void>(resolve => { resumeReconnect = resolve; reconnectTimer = setTimeout(resolve, delay); });
           if (view.closed) break;
-          try { await client.connect(); if (!view.closed) await view.reconnected(); if (!client.connected && !view.closed) throw new Error('Connection lost during recovery'); break; }
-          catch { delay = Math.min(delay * 2, 10000); }
+          try {
+            await client.connect();
+            if (view.closed) break;
+            await view.reconnected();
+            if ((view.conversation.readError as { code?: string })?.code === 'ACCOUNT_MISMATCH') break;
+            if (!client.connected || !view.conversation.connected) throw new Error('Connection not ready during recovery');
+            break;
+          }
+          catch { client.close(); delay = Math.min(delay * 2, 10000); }
         }
       } finally { reconnecting = false; }
     })();
+  };
+  const unDisconnect = client.onDisconnect(recover);
+  const unSession = client.onNotification((method, params) => {
+    const uri = view.conversation.active && `kakao://rooms/${view.conversation.active.id}/messages`;
+    if (method === 'notifications/resources/updated' && params.uri === uri && params._meta?.error?.code === 'NOT_CONNECTED') {
+      // A LOCO reconnect can leave the MCP socket alive. Reconnect metadata-only
+      // until the same account is ready, then restore the prior live subscription.
+      queueMicrotask(() => {
+        if (view.closed || reconnecting || (view.conversation.readError as { code?: string })?.code !== 'NOT_CONNECTED') return;
+        recover(Object.assign(new Error('Account session reconnecting'), { code: 'NOT_CONNECTED' }));
+        client.close();
+      });
+    }
   });
   try {
     render(); await client.connect(); await view.start();
@@ -325,7 +345,7 @@ export async function runTerminalMessenger(args: string[], endpoint: { host: str
   } catch (e) {
     throw new Error(conversationError(e, demo));
   } finally {
-    unDisconnect(); if (reconnectTimer) clearTimeout(reconnectTimer); resumeReconnect?.();
+    unDisconnect(); unSession(); if (reconnectTimer) clearTimeout(reconnectTimer); resumeReconnect?.();
     view.close(); client.close();
     process.stdin.off('keypress', onKey); process.stdout.off('resize', render);
     process.off('SIGTERM', stop); process.off('SIGHUP', stop);

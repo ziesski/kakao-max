@@ -142,6 +142,7 @@ export class Conversation {
     this.stopWatch();
     this._live = false;
     const code = (error as { code?: unknown })?.code;
+    if (code === 'NOT_CONNECTED') this._connected = false;
     // Keep the last authorized view on transport/budget failures. Permission,
     // identity and malformed-response failures still discard displayed content.
     if (!['RATE_LIMITED', 'NETWORK', 'TIMEOUT', 'NOT_CONNECTED'].includes(String(code))) this._messages = [];

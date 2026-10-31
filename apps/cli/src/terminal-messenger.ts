@@ -202,12 +202,13 @@ export class TerminalMessenger {
     const lines: string[] = [];
     const add = (s: string) => lines.push(fit(s, width));
     add(`kakao-max  |  터미널 메신저 · 모드: ${this.conversation.mode ?? '확인 중'} · 읽음 표시 안 보냄` + (this.options.demo ? '  ·  촬영 모드' : ''));
-    add(this.busy ? '처리 중…  ·  작성 중인 내용은 유지됩니다.' : this.status);
+    const statusLines = wrap(this.busy ? '처리 중…  ·  작성 중인 내용은 유지됩니다.' : this.status, width).slice(0, height - 10);
+    for (const line of statusLines) add(line);
     add('─'.repeat(width));
     if (this.approval) {
       const a = this.approval;
       const text = String(a.params.message ?? '').split('\n').flatMap(s => wrap(s, width));
-      const bodyHeight = height - 6;
+      const bodyHeight = height - 5 - statusLines.length;
       a.scroll = Math.min(a.scroll, Math.max(0, text.length - bodyHeight));
       for (let i = 0; i < bodyHeight; i++) add(text[a.scroll + i] ?? '');
       add(a.phase === 'code' ? `승인 코드 > ${a.text}` : `${shellText(a.params.requestedSchema.properties.remember.title)}? [y/N] > ${a.text}`);
@@ -215,7 +216,7 @@ export class TerminalMessenger {
     } else {
       const leftWidth = Math.min(32, Math.floor(width / 3));
       const rightWidth = width - leftWidth - 3;
-      const bodyHeight = height - 7;
+      const bodyHeight = height - 6 - statusLines.length;
       const visible = this.filtered;
       const start = Math.max(0, this.selected - bodyHeight + 2);
       const messages = this.conversation.messages.flatMap(m => wrap(this.presentation.message(m, this.conversation.userId), rightWidth));

@@ -2,6 +2,8 @@ import { terminalText } from './terminal-text.ts';
 const TRUST_MODE_HELP = 'trust 모드에서는 이 제한이 해제됩니다. 전환은 서버 설정에서 하며, 연결된 AI 전체의 읽기·전송 권한에 영향을 줍니다. 설정의 위험 안내를 확인하고 직접 선택하세요.';
 const MESSAGES: Record<string, string> = {
   ACCOUNT_MISMATCH: '조회와 전송 연결의 계정이 일치하지 않습니다. 메시지를 보내지 않았습니다. 연결 설정을 확인하세요.',
+  NOT_SUPPORTED: '데몬이 이벤트 구독을 지원하지 않습니다. 데몬과 CLI를 함께 업데이트하세요.',
+  NOT_FOUND: '이 대화방을 더 이상 사용할 수 없습니다. 방 목록을 새로 확인하세요.',
   NOT_CONNECTED: '연결이 끊겼습니다. 다시 연결한 뒤 대화를 조회하세요.',
   RATE_LIMITED: '요청 한도에 도달했습니다. 자동 갱신 중지 · 한도 회복 후 Ctrl+R로 다시 조회하세요.',
   TIMEOUT: '대화 조회가 지연됐습니다. Ctrl+R로 다시 조회할 수 있습니다.',

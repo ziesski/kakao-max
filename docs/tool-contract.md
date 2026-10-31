@@ -80,3 +80,12 @@ pause·상한·속도 제한·방 허가 하루 한도는 그대로이고, 저�
 `KAKAO_MCP_PROFILE`, `KAKAO_MCP_PERMISSION_MODEL`, `KAKAO_AGENT_APPROVAL_PUBLIC_KEY_FILE`을 제거하고,
 `KAKAO_ALLOWED_CHAT_IDS`를 쓰던 운영자 상한은 `KAKAO_ROOM_CEILING`으로 바꿉니다.
 옛 prepare/commit 도구와 agent confirm 인자는 지원하지 않습니다. 기존 대기 작업은 새로 검토합니다.
+
+
+## 방 변경 리소스 구독
+
+초기화된 stateful MCP 연결은 `kakao://rooms/{chatId}/messages`를 `resources/subscribe` / `resources/unsubscribe`로 구독할 수 있습니다. 리소스 템플릿은 `resources/templates/list`에 공개하고 실제 방 목록은 기존 `list_chats`를 사용합니다. stateless modern 요청은 구독 상태를 유지하지 않으며, legacy `initialize` 연결에서만 subscribe=true를 광고합니다. [MCP 리소스 규격](https://modelcontextprotocol.io/specification/2025-11-25/server/resources)을 따릅니다.
+
+`notifications/resources/updated`의 `params`는 `{uri, _meta: {subscriptionId}}`입니다. 본문·작성자·프로필·메시지 ID는 전달하지 않습니다. `_meta.error.code`가 있으면 해당 구독이 중지된 것입니다. 리소스 읽기는 내용 없는 종류 설명만 반환하고, 메시지 본문은 항상 기존 `read_messages`를 통합니다. 알림과 유휴 구독은 내용 조회 예산을 사용하지 않으며 실제 본문 조회의 한도는 유지됩니다.
+
+구독 때와 알림 직전에 기존 방 규칙·ask 읽음 상태·연결 상태를 확인합니다. pause·운영자 방 상한도 적용합니다. 권한 철회, 만료, 방 나가기, 연결 단절 시 해제하며 연결당 최대 한 방, 계정 core당 최대 64개로 제한합니다. `subscriptionId`는 재구독 세대를 구분해 늦은 알림을 버리는 데만 사용합니다. `read_messages` history의 `liveCursor`는 초기 조회 전의 일시적 피드 위치이고 recent의 `hasMore`는 다음 묶음 조회 신호입니다. 피드 cursor는 재시작을 넘는 영속 체크포인트가 아닙니다.

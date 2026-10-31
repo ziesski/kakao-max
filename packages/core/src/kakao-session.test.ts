@@ -978,3 +978,45 @@ test('an omitted invalid-count flag preserves an explicit numeric count, never a
     assert.equal(result.serverUnreadCount, serverUnreadCount);
   }
 });
+
+test('trust message watches are idle and receipt-free signals, while actual deliveries keep their budget', async () => {
+  const { kakao, fake } = setup({ KAKAO_AGENT_MODE: 'trust' }); phoneRead(kakao);
+  kakao.setRoomAccess(CHAT, { mode: 'immediate', callsPerHour: 1 });
+  const changes: Array<string | undefined> = [];
+  const stop = await kakao.watchRoomMessages(CHAT, code => changes.push(code));
+  fake.emit('read', { chatId: CHAT, userId: '42', watermark: '100' });
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(changes, []);
+  fake.emit('message', { chatId: CHAT, messageId: '101', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(changes, [undefined]);
+  await kakao.recentMessages(0, CHAT); await assert.rejects(kakao.recentMessages(0, CHAT), isCode('RATE_LIMITED'));
+  kakao.setRoomAccess(CHAT, { mode: 'deny' }); assert.equal(changes.at(-1), 'POLICY_DENIED');
+  const count = changes.length; fake.emit('message', { chatId: CHAT, messageId: '102', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(changes.length, count); stop();
+});
+
+test('ask message watches stop before signaling a newly unread message', async () => {
+  const { kakao, fake } = setup(); phoneRead(kakao);
+  const changes: Array<string | undefined> = [];
+  const stop = await kakao.watchRoomMessages(CHAT, code => changes.push(code));
+  fake.emit('message', { chatId: CHAT, messageId: '101', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(changes, ['ROOM_NOT_READ']); stop();
+});
+
+test('expiring watch authorization is rechecked without another content request', async () => {
+  const { kakao, fake } = setup({ KAKAO_AGENT_MODE: 'trust' }); phoneRead(kakao);
+  kakao.setRoomAccess(CHAT, { mode: 'immediate', expiresAt: new Date(Date.now() + 500).toISOString() });
+  const changes: Array<string | undefined> = [];
+  const stop = await kakao.watchRoomMessages(CHAT, code => changes.push(code));
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.deepEqual(changes, ['POLICY_DENIED']); assert.equal(fake.calls.length, 0); stop();
+});
+
+
+test('room departure stops a trust subscription and unknown rooms cannot be watched', async () => {
+  const { kakao, fake } = setup({ KAKAO_AGENT_MODE: 'trust' }); phoneRead(kakao);
+  await assert.rejects(kakao.watchRoomMessages('111', () => {}), isCode('NOT_FOUND'));
+  const changes: Array<string | undefined> = [];
+  const stop = await kakao.watchRoomMessages(CHAT, code => changes.push(code));
+  fake.emit('packet', { header: { id: 0, status: 0, method: 'LEFT' }, data: { chatId: CHAT } });
+  assert.deepEqual(changes, ['NOT_FOUND']); stop();
+});

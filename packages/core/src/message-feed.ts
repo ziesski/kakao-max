@@ -1,7 +1,8 @@
 // ----------------------------------------------------------------------------
 // Live inbound feed for request/response adapters.
 //
-// MCP tools cannot push, so "receive" is a bounded ring buffer of recent events
+// Content reads use a bounded ring buffer; authorized resource subscribers get change signals.
+// The buffer contains recent events
 // (messages and read receipts) with a monotonic sequence: callers poll with
 // `recent(sinceSeq)` or long-poll with `wait(sinceSeq, timeoutMs)`.
 // ----------------------------------------------------------------------------
@@ -21,6 +22,11 @@ export class MessageFeed {
   private readonly waiters: Array<() => void> = [];
   private readonly max: number;
   private seq = 0;
+  private readonly listeners = new Set<(chatId: string) => void>();
+
+  onMessage(listener: (chatId: string) => void): () => void {
+    this.listeners.add(listener); return () => { this.listeners.delete(listener); };
+  }
 
   constructor(max = MESSAGE_BUFFER_MAX) {
     this.max = max;
@@ -35,6 +41,7 @@ export class MessageFeed {
   push(m: IncomingMessage & { authorName?: string }): BufferedMessage {
     const item: BufferedMessage = { ...m, seq: ++this.seq };
     this.append(item);
+    for (const listener of [...this.listeners]) listener(String(item.chatId));
     return item;
   }
 

@@ -218,8 +218,11 @@ export class SendPolicy {
     }
   }
 
+  private readonly pauseListeners = new Set<() => void>();
+  onPauseChanged(listener: () => void): () => void { this.pauseListeners.add(listener); return () => { this.pauseListeners.delete(listener); }; }
   setPaused(value: boolean): void {
     this.paused = value;
+    for (const listener of [...this.pauseListeners]) listener();
   }
 
   isPaused(): boolean {

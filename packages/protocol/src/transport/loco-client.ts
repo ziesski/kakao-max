@@ -84,7 +84,7 @@ export class LocoClient {
     return new Promise((resolve, reject) => {
       const socket = tls.connect({ host, port, servername: host, timeout: 10000 }, () => {
         const req = {
-          MCCMNC: '999',
+          MCCMNC: this.os === 'android' ? '99999' : '999',
           model: '',
           os: this.os
         };
@@ -136,7 +136,7 @@ export class LocoClient {
         const { handshakeBytes, aesKey } = createLocoV2Handshake();
 
         const req = {
-          MCCMNC: '999',
+          MCCMNC: this.os === 'android' ? '99999' : '999',
           appVer: this.appVersion,
           countryISO: 'KR',
           lang: 'ko',
@@ -205,9 +205,10 @@ export class LocoClient {
           lang: 'ko',
           duuid: deviceUUID,
           oauthToken: accessToken,
+          ...(this.os === 'android' ? { rp: new BSON.Binary(Buffer.from([0, 0, 255, 255, 0, 0])) } : {}),
           dtype: 2, // sub-device
           ntype: 0, // wifi
-          MCCMNC: '999',
+          MCCMNC: this.os === 'android' ? '99999' : '999',
           revision: 0,
           chatIds: [],
           maxIds: [],

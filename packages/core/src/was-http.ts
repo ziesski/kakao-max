@@ -8,6 +8,7 @@
 //   - fetch / JSON failure → NETWORK
 // ----------------------------------------------------------------------------
 
+import { TABLET_AUTH_CONFIG } from '@kakao-max/protocol';
 import type { KakaoConfig } from './config.ts';
 import { KakaoError } from './errors.ts';
 
@@ -19,7 +20,7 @@ export interface WasCreds {
 export function wasHeaders(client: KakaoConfig['client'], creds: WasCreds): Record<string, string> {
   return {
     'A': `${client.os}/${client.appVersion}/${client.lang}`,
-    'User-Agent': `KT/${client.appVersion} Mc/15.0 ${client.lang}`,
+    'User-Agent': `KT/${client.appVersion} ${client.os === 'android' ? `An/${TABLET_AUTH_CONFIG.osVersion}` : 'Mc/15.0'} ${client.lang}`,
     'Authorization': `${creds.accessToken}-${creds.deviceUUID}`,
     'Accept-Language': client.lang
   };

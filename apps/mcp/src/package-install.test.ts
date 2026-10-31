@@ -31,7 +31,7 @@ function fixture(t: { after(fn: () => void): void }) {
   const host: BootstrapHost = {
     root, repo, unitFile: path.join(parent, 'daemon.service'), node: '/usr/bin/node', npm: '',
     reason: 'fixture package bootstrap', release: release(parent, 'release-1', '0.1.0', '// daemon 0.1.0\n'),
-    log: () => {}, prompt: async q => q.startsWith('자동 재로그인을 위해') ? '' : answers.shift() ?? '',
+    log: () => {}, prompt: async q => q.startsWith('자동 재로그인을 위해') || q.startsWith('연결 기기 유형') ? '' : answers.shift() ?? '',
     run: (program, args) => {
       commands.push({ program, args });
       if (program === 'getent') return user ? `kakao-max:x:${uid}:${gid}::/var/lib/kakao-max:/usr/sbin/nologin` : '';
@@ -68,7 +68,7 @@ test('a package bootstrap copies and pins the release without Git, npm or a buil
   const f = fixture(t);
   assert.equal(await bootstrapLocal(f.host), 'ready');
   assert.ok(!f.commands.some(c => ['git', 'runuser'].includes(c.program)));
-  assert.deepEqual(f.state(), { version: 2, release: '0.1.0', digest: f.host.release!.digest, phase: 'running', port: 8787 });
+  assert.deepEqual(f.state(), { version: 2, release: '0.1.0', digest: f.host.release!.digest, phase: 'running', port: 8787, deviceType: 'pc' });
   const app = path.join(f.root, 'app');
   assert.equal(releaseDigest(app), f.host.release!.digest);
   assert.ok(fs.existsSync(path.join(app, '.env.local')));
@@ -127,7 +127,7 @@ test('a package update stops the daemon, swaps the release, keeps credentials an
   assert.ok(commands.indexOf('systemctl stop kakao-max.service') < commands.indexOf('systemctl start kakao-max.service'));
   assert.equal(fs.readFileSync(env, 'utf8'), credentials);
   assert.equal(releaseDigest(path.join(f.root, 'app')), next.digest);
-  assert.deepEqual(f.state(), { version: 2, release: '0.2.0', digest: next.digest, phase: 'running', port: 8787 });
+  assert.deepEqual(f.state(), { version: 2, release: '0.2.0', digest: next.digest, phase: 'running', port: 8787, deviceType: 'pc' });
 
   commands.length = 0; await updateManaged(update);
   assert.ok(!commands.includes('systemctl stop kakao-max.service'), 'the same release does not restart the daemon');

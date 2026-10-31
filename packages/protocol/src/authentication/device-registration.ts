@@ -107,10 +107,12 @@ export class KakaoDeviceRegistration {
   readonly deviceUuid: string;
   readonly deviceName: string;
   private readonly auth: KakaoAuthClient;
+  private readonly tablet: boolean;
 
   constructor(deviceName: string, config: Partial<AuthClientConfig> = {}, deviceUuid?: string) {
     this.deviceName = deviceName;
-    this.deviceUuid = deviceUuid ?? generateDeviceUuid();
+    this.tablet = config.agent === 'android';
+    this.deviceUuid = deviceUuid ?? (this.tablet ? crypto.randomBytes(32).toString('hex') : generateDeviceUuid());
     this.auth = new KakaoAuthClient(deviceName, this.deviceUuid, config);
   }
 
@@ -134,7 +136,7 @@ export class KakaoDeviceRegistration {
       const result = await observe(stage, () => this.auth.login(email, password));
       // A single conflict retry, only after explicit consent for this registration.
       // Phone approval and all other failures keep their ordinary semantics.
-      if (result.status !== -101 || opts.confirmTakeover !== true || takeoverAttempted) return result;
+      if (result.status !== -101 || this.tablet || opts.confirmTakeover !== true || takeoverAttempted) return result;
       takeoverAttempted = true;
       return observe('takeover_login', () => this.auth.login(email, password, true));
     };
@@ -148,8 +150,9 @@ export class KakaoDeviceRegistration {
     }
 
 
-    if (signRegistration === 'disabled') {
-      // Existing Mac passcode endpoints; this branch still needs live E2E evidence.
+    if (this.tablet && signRegistration !== 'absent' && signRegistration !== 'disabled') return { status: first.status, deviceUuid: this.deviceUuid, failure: 'unsupported-method', message: 'Unrecognized tablet registration method; stopped' };
+    if (signRegistration === 'disabled' || (this.tablet && signRegistration === 'absent')) {
+      // Passcode flow (Mac sign=false or Android); tablet still needs live E2E evidence.
       // Do not generate a code unless the caller can show it directly to the human.
       if (!opts.onPasscode) return { status: first.status, deviceUuid: this.deviceUuid,
         failure: 'unsupported-method', message: 'This account requires a passcode-capable registration client' };

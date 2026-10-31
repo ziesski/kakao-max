@@ -6,7 +6,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { KakaoDeviceRegistration, type SignRegistrationResult } from '@kakao-max/protocol';
+import { KakaoDeviceRegistration, authConfigForDevice, type DeviceType, type SignRegistrationResult } from '@kakao-max/protocol';
 import { KakaoError, isMainModule, installRoot, packagedEntry, programArgs } from '@kakao-max/core';
 import { confirmSetup, terminalPrompt, type SetupPrompt } from './setup-prompts.ts';
 import { probe } from './healthcheck.ts';
@@ -21,13 +21,13 @@ function present(file: string): boolean {
 type Phase = 'building' | 'prepared' | 'configured' | 'running';
 /** version 1 pins a Git commit of a source checkout; version 2 pins a published package release. */
 export type InstallState =
-  | { version: 1; commit: string; phase: Phase; port?: number; deviceUuid?: string }
-  | { version: 2; release: string; digest: string; phase: Phase; port?: number; deviceUuid?: string };
+  | { version: 1; commit: string; phase: Phase; port?: number; deviceUuid?: string; deviceType?: DeviceType }
+  | { version: 2; release: string; digest: string; phase: Phase; port?: number; deviceUuid?: string; deviceType?: DeviceType };
 export interface BootstrapHost {
   repo: string; root: string; unitFile: string; node: string; npm: string;
   run(program: string, args: string[], allowFailure?: boolean, cwd?: string): string;
   prompt: SetupPrompt; log(text: string): void;
-  register(email: string, password: string, uuid: string, takeover: boolean): Promise<SignRegistrationResult>;
+  register(email: string, password: string, uuid: string, takeover: boolean, deviceType?: DeviceType): Promise<SignRegistrationResult>;
   occupied(): Promise<boolean>; healthy(expectedUserId: string): Promise<boolean>; wait(ms: number): Promise<void>;
   reason: string;
   port?: number;
@@ -106,8 +106,8 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
     }
     const pin = pkg ? releaseLabel(pkg.version, pkg.digest) : commit.slice(0, 12);
     const pinned = (st: InstallState) => pkg ? st.version === 2 && st.release === pkg.version && st.digest === pkg.digest : st.version === 1 && st.commit === commit;
-    const pinState = (phase: Phase, deviceUuid?: string): InstallState => {
-      const extra = deviceUuid === undefined ? {} : { deviceUuid };
+    const pinState = (phase: Phase, deviceUuid?: string, deviceType?: DeviceType): InstallState => {
+      const extra = { ...(deviceUuid === undefined ? {} : { deviceUuid }), ...(deviceType === undefined ? {} : { deviceType }) };
       return pkg ? { version: 2, release: pkg.version, digest: pkg.digest, phase, port, ...extra } : { version: 1, commit, phase, port, ...extra };
     };
     const stateFile = path.join(h.root, 'install-state.json'), app = path.join(h.root, 'app'), data = path.join(h.root, 'data');
@@ -123,7 +123,8 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       }
       const validPin = state.version === 1 ? /^[a-f0-9]{40}$/.test(state.commit) : state.version === 2 && RELEASE_VERSION.test(state.release) && RELEASE_DIGEST.test(state.digest);
       if (!validPin || (state.port ?? 8787) !== port || !['building','prepared','configured','running'].includes(state.phase) ||
-          state.deviceUuid !== undefined && !validUuid(state.deviceUuid)) {
+          state.deviceType !== undefined && !['pc', 'tablet'].includes(state.deviceType) ||
+          state.deviceUuid !== undefined && !validUuid(state.deviceUuid, state.deviceType)) {
         throw new KakaoError('CONFIG_INVALID', 'Existing installation needs review; bootstrap does not update another revision');
       }
       if (fs.existsSync(path.join(data, 'operator-paused'))) throw new KakaoError('POLICY_DENIED', 'Operator pause is active; setup will not resume it');
@@ -143,7 +144,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
         }
         h.log(pkg ? '아직 로그인하지 않은 설치를 이 패키지 버전으로 갱신합니다. 기존 기기 키는 유지합니다.'
           : '아직 로그인하지 않은 설치 코드를 최신 origin/main으로 갱신합니다. 기존 기기 키는 유지합니다.');
-        state = pinState('building', state.deviceUuid); writePrivate(stateFile, JSON.stringify(state));
+        state = pinState('building', state.deviceUuid, state.deviceType); writePrivate(stateFile, JSON.stringify(state));
       }
     } else {
       if (present(h.unitFile) || present(path.join(h.repo, '.env.local')) ||
@@ -190,7 +191,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
         h.run('chmod', ['-R', 'u=rwX,g=rX,o=', app]);
         fs.rmSync(cache, { recursive: true, force: true });
       }
-      state = pinState('prepared', state.deviceUuid);
+      state = pinState('prepared', state.deviceUuid, state.deviceType);
       writePrivate(stateFile, JSON.stringify(state));
     }
     ownerPath(app, true);
@@ -216,25 +217,32 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       if ((fs.statSync(envFile).mode & 0o077) || fs.statSync(envFile).size > 65536) {
         throw new KakaoError('STORAGE_UNSAFE', 'Existing credentials require review; no registration attempted');
       }
-      state = pinState('configured'); persistState();
+      state = pinState('configured', undefined, state.deviceType); persistState();
     }
     if (state.phase === 'prepared') {
       if (await h.occupied()) throw new KakaoError('WORKER_IN_USE', 'MCP endpoint is in use; no registration attempted');
+      if (!state.deviceUuid && !state.deviceType) {
+        const choice = (await h.prompt('연결 기기 유형 [pc/tablet, 기본 pc; tablet은 실험적]: ')).trim().toLowerCase() || 'pc';
+        if (choice !== 'pc' && choice !== 'tablet') throw new KakaoError('INVALID_ARGUMENT', 'Choose pc or tablet');
+        state.deviceType = choice; persistState();
+      }
+      if (state.deviceType === 'tablet') h.log('실험적 Android 태블릿 연결입니다. 기존 보조 기기가 있으면 충돌할 수 있습니다. 기기 해제·강제 로그인은 하지 않습니다.');
       h.log('계정 정보를 입력하면 휴대폰 승인 로그인을 요청합니다. Ctrl+C로 취소할 수 있습니다. 기존 PC 카카오톡과 충돌할 수 있습니다. 비밀번호는 화면·명령 인자에 남기지 않습니다. 로그인 성공 후 자동 재로그인을 위한 서버 저장 여부를 선택할 수 있습니다.');
       const email = (await h.prompt('카카오 계정 이메일: ')).trim();
       let password = await h.prompt('카카오 계정 비밀번호: ', true);
       if (!email || !password || /[\r\n\0]/.test(email + password)) throw new KakaoError('INVALID_ARGUMENT', 'Account input is empty or invalid');
-      state.deviceUuid ??= randomBytes(52).toString('base64'); persistState();
+      state.deviceUuid ??= state.deviceType === 'tablet' ? randomBytes(32).toString('hex') : randomBytes(52).toString('base64'); persistState();
       let result: SignRegistrationResult;
       let loginData: { email: string; password: string } | undefined;
       try {
-        result = await h.register(email, password, state.deviceUuid, false);
+        result = await h.register(email, password, state.deviceUuid, false, state.deviceType);
+        if (result.status === -101 && state.deviceType === 'tablet') throw new KakaoError('PC_SESSION_CONFLICT', '보조 기기 연결이 충돌합니다. 기존 기기를 유지하고 중단했습니다. 휴대폰에서 등록 기기를 확인하세요.');
         if (result.status === -101) {
           h.log('다른 PC가 계정을 사용 중입니다. Enter로 기존 연결을 유지할 수 있습니다.');
           if (!await confirmSetup(h.prompt, '기존 PC를 로그아웃하고 이 서버로 연결할까요?')) {
             throw new KakaoError('PC_SESSION_CONFLICT', '기존 PC 연결을 유지했습니다. 계정 이전·서비스 시작을 하지 않습니다.');
           }
-          result = await h.register(email, password, state.deviceUuid, true);
+          result = await h.register(email, password, state.deviceUuid, true, state.deviceType);
         }
         if (result.status === 0 && await confirmSetup(h.prompt, '자동 재로그인을 위해 이메일·비밀번호를 이 서버의 비공개 .env.local에 저장할까요? (강제 로그인 없음, 최대 하루 3회)')) {
           loginData = { email, password };
@@ -249,22 +257,23 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       if (result.status !== 0) throw new KakaoError(result.status === -101 ? 'PC_SESSION_CONFLICT' : 'LOCO_STATUS', `Account connection did not complete (status ${result.status}); check the account/phone approval before running setup again. No service was started.`);
       const values = { KAKAO_USER_ID: result.credentials?.userId, KAKAO_ACCESS_TOKEN: result.credentials?.accessToken,
         KAKAO_REGISTERED_DEVICE_UUID: result.deviceUuid, KAKAO_REFRESH_TOKEN: result.credentials?.refreshToken };
-      if (!/^[1-9]\d{0,18}$/.test(values.KAKAO_USER_ID ?? '') || BigInt(values.KAKAO_USER_ID!) > 9223372036854775807n || !values.KAKAO_ACCESS_TOKEN || !validUuid(result.deviceUuid) || result.deviceUuid !== state.deviceUuid ||
+      if (!/^[1-9]\d{0,18}$/.test(values.KAKAO_USER_ID ?? '') || BigInt(values.KAKAO_USER_ID!) > 9223372036854775807n || !values.KAKAO_ACCESS_TOKEN || !validUuid(result.deviceUuid, state.deviceType) || result.deviceUuid !== state.deviceUuid ||
           Object.values(values).some(v => v !== undefined && (typeof v !== 'string' || v.length > 8192 || /[\x00-\x1f\x7f]/.test(v)))) {
         throw new KakaoError('CONFIG_INVALID', 'Registration returned incomplete credentials; nothing was persisted');
       }
-      const config = { ...values, KAKAO_DATA_DIR: data, KAKAO_AUDIT_LOG: path.join(data, 'audit.log'), KAKAO_MCP_LISTEN: listen,
+      const config = { ...values, KAKAO_REGISTERED_DEVICE_TYPE: state.deviceType ?? 'pc', KAKAO_DEVICE_NAME: state.deviceType === 'tablet' ? 'SM-T870' : 'kakao-max Linux', KAKAO_DATA_DIR: data, KAKAO_AUDIT_LOG: path.join(data, 'audit.log'), KAKAO_MCP_LISTEN: listen,
         KAKAO_ENABLE_TOKEN_REFRESH: loginData ? '1' : '0',
         KAKAO_AUTH_RELOGIN_MAX_ATTEMPTS: '3', KAKAO_EMAIL: loginData?.email, KAKAO_PASSWORD: loginData?.password,
         KAKAO_MCP_ALLOWED_UIDS: h.operatorUid !== undefined ? String(h.operatorUid) : undefined };
       writePrivate(envFile, Object.entries(config).filter(([,v]) => v !== undefined).map(([k,v]) => `${k}=${v}`).join('\n') + '\n', serviceUid, serviceGid);
       loginData = undefined;
-      state = pinState('configured'); persistState();
+      state = pinState('configured', undefined, state.deviceType); persistState();
     }
     ownerPath(envFile, false, serviceUid);
     if ((fs.statSync(envFile).mode & 0o077) || fs.statSync(envFile).size > 65536) throw new KakaoError('STORAGE_UNSAFE', 'Credentials must be private to the service account');
     const saved = parseEnv(fs.readFileSync(envFile, 'utf8'));
-    if (!/^[1-9]\d{0,18}$/.test(saved.KAKAO_USER_ID ?? '') || BigInt(saved.KAKAO_USER_ID) > 9223372036854775807n || !saved.KAKAO_ACCESS_TOKEN || !validUuid(saved.KAKAO_REGISTERED_DEVICE_UUID) ||
+    if (!/^[1-9]\d{0,18}$/.test(saved.KAKAO_USER_ID ?? '') || BigInt(saved.KAKAO_USER_ID) > 9223372036854775807n || !saved.KAKAO_ACCESS_TOKEN || !validUuid(saved.KAKAO_REGISTERED_DEVICE_UUID, (saved.KAKAO_REGISTERED_DEVICE_TYPE ?? 'pc') as DeviceType) ||
+        !['pc', 'tablet'].includes(saved.KAKAO_REGISTERED_DEVICE_TYPE ?? 'pc') || (saved.KAKAO_REGISTERED_DEVICE_TYPE ?? 'pc') !== (state.deviceType ?? 'pc') ||
         saved.KAKAO_DATA_DIR !== data || saved.KAKAO_MCP_LISTEN !== listen) {
       throw new KakaoError('STORAGE_UNSAFE', 'Stored installation settings require review; no registration or start attempted');
     }
@@ -292,7 +301,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
       if (attempt < 9) await h.wait(1000);
     }
     if (!connected) throw new KakaoError('NOT_CONNECTED', 'Service was started but account health is not confirmed. Inspect systemctl/journal; setup will not retry login or restart it.');
-    state = pinState('running'); persistState();
+    state = pinState('running', undefined, state.deviceType); persistState();
     const deployLog = path.join(h.root, 'deploys.log');
     if (present(deployLog)) ownerPath(deployLog);
     const logFd = fs.openSync(deployLog, fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
@@ -303,7 +312,8 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
   } finally { fs.closeSync(lockFd); fs.unlinkSync(lock); }
 }
 
-function validUuid(value: string): boolean {
+function validUuid(value: string, type: DeviceType = 'pc'): boolean {
+  if (type === 'tablet') return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
   return typeof value === 'string' && value.length === 72 && Buffer.from(value, 'base64').length === 52 && Buffer.from(value, 'base64').toString('base64') === value;
 }
 
@@ -367,7 +377,7 @@ if (isMainModule(import.meta.url, 'setup-system')) {
       reason: process.argv[3], port,
       operatorUid: /^[1-9]\d{0,9}$/.test(process.env.SUDO_UID ?? '') ? Number(process.env.SUDO_UID) : undefined,
       wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
-      register: (email, password, uuid, takeover) => new KakaoDeviceRegistration('kakao-max Linux', {}, uuid).register(email, password, {
+      register: (email, password, uuid, takeover, deviceType) => new KakaoDeviceRegistration(deviceType === 'tablet' ? 'SM-T870' : 'kakao-max Linux', authConfigForDevice(deviceType), uuid).register(email, password, {
         confirmTakeover: takeover,
         // Closed stage/status diagnostics only: never print raw responses or account input.
         onResponse: trace => {
@@ -375,7 +385,7 @@ if (isMainModule(import.meta.url, 'setup-system')) {
             process.stderr.write(`[setup] account stage=${trace.stage} status=${trace.status} httpStatus=${trace.httpStatus ?? 'unknown'} signRegistration=${trace.signRegistration ?? 'unknown'}\n`);
           }
         },
-        onPasscode: info => process.stderr.write(`휴대폰 카카오톡의 PC 기기 인증 화면에 아래 인증번호를 입력해 주세요.\n인증번호: ${info.passcode} (유효 시간 ${Math.floor(info.remainingSeconds)}초)\n`),
+        onPasscode: info => process.stderr.write(`휴대폰 카카오톡의 기기 인증 화면에 아래 인증번호를 입력해 주세요.\n인증번호: ${info.passcode} (유효 시간 ${Math.floor(info.remainingSeconds)}초)\n`),
         onAwaitingApproval: () => process.stderr.write('휴대폰 카카오톡에서 새 기기 로그인을 승인해 주세요.\n') }) });
     if (outcome !== 'ready') {
       process.stderr.write(outcome === 'configured' ? '계정 설정만 보존했습니다. 서비스를 시작하지 않았습니다.\n' : '설치를 취소했습니다. 준비된 파일이 있으면 다음 실행에서 이어갑니다.\n');

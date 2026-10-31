@@ -9,6 +9,7 @@
 // ----------------------------------------------------------------------------
 
 import fs from 'node:fs';
+import type { DeviceType } from '@kakao-max/protocol';
 import { setupCommand } from './entry.ts';
 import path from 'node:path';
 import { findEnvFile } from './env-file.ts';
@@ -19,6 +20,8 @@ export interface KakaoCredentials {
   userId: string;
   accessToken: string;
   deviceUUID: string;
+  /** Absent in legacy stores means PC; never inferred from UUID shape. */
+  deviceType?: DeviceType;
   /** Present when login returned it; required to attempt renewal-endpoint refresh. */
   refreshToken?: string;
   email?: string;
@@ -153,9 +156,9 @@ export class CredentialStore {
    */
   static readOptional(
     opts: { envPath?: string; env?: Record<string, string | undefined> } = {}
-  ): { email?: string; password?: string; deviceName?: string; envPath: string } {
-    const { envPath, credentials: { email, password, deviceName } } = loadConfig(opts);
-    return { email, password, deviceName, envPath };
+  ): { email?: string; password?: string; deviceName?: string; deviceType?: DeviceType; envPath: string } {
+    const { envPath, credentials: { email, password, deviceName, deviceType } } = loadConfig(opts);
+    return { email, password, deviceName, deviceType, envPath };
   }
 
   /**
@@ -166,7 +169,7 @@ export class CredentialStore {
    */
   static persistCredentials(
     envPath: string,
-    creds: Partial<Pick<KakaoCredentials, 'userId' | 'accessToken' | 'refreshToken' | 'deviceUUID' | 'email' | 'deviceName'>>
+    creds: Partial<Pick<KakaoCredentials, 'userId' | 'accessToken' | 'refreshToken' | 'deviceUUID' | 'email' | 'deviceName' | 'deviceType'>>
   ): void {
     writeEnvKeys(envPath, {
       KAKAO_USER_ID: creds.userId,
@@ -174,7 +177,8 @@ export class CredentialStore {
       KAKAO_REFRESH_TOKEN: creds.refreshToken,
       KAKAO_REGISTERED_DEVICE_UUID: creds.deviceUUID,
       KAKAO_EMAIL: creds.email,
-      KAKAO_DEVICE_NAME: creds.deviceName
+      KAKAO_DEVICE_NAME: creds.deviceName,
+      KAKAO_REGISTERED_DEVICE_TYPE: creds.deviceType
     });
   }
 }

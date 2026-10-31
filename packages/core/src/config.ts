@@ -8,7 +8,9 @@
 //   KAKAO_DATA_DIR             local data directory (default ~/.kakao-max, fallback ~/.kakao)
 //   KAKAO_APP_VERSION          KakaoTalk client version we present (default 26.4.0).
 //                              Raise it when Kakao rejects old clients.
-//   KAKAO_CLIENT_OS            client OS we present: only `mac` is verified (default mac)
+//   KAKAO_DEVICE_TYPE          pc (default) or experimental tablet; new registrations only
+//   KAKAO_REGISTERED_DEVICE_TYPE identity bound to saved credentials (legacy: pc)
+//   KAKAO_CLIENT_OS            must match the selected identity: mac or android
 //   KAKAO_LANG                 client language (default ko)
 //   KAKAO_TIMEZONE             IANA time zone sent to profile APIs (default Asia/Seoul)
 //   KAKAO_ENABLE_TOKEN_REFRESH truthy → refresh credentials on auth failure
@@ -22,6 +24,7 @@
 // CredentialStore, and outbound policy by loadPolicyConfig.
 // ----------------------------------------------------------------------------
 
+import { authConfigForDevice, type DeviceType } from '@kakao-max/protocol';
 import type { PolicyConfig } from './policy.ts';
 import type { KakaoCredentials } from './credentials.ts';
 import fs from 'node:fs';
@@ -31,8 +34,8 @@ import { findEnvFile, readEnvFile } from './env-file.ts';
 import { KakaoError } from './errors.ts';
 import { AGENT_MODES, type AgentMode } from './agent-mode.ts';
 
-// Only the Mac client wire format (LOCO + friends API headers) is implemented.
-export type ClientOs = 'mac';
+// PC remains the default; Android tablet support is experimental.
+export type ClientOs = 'mac' | 'android';
 
 export interface KakaoConfig {
   /** Secrets: never log or serialize the complete configuration. */
@@ -179,7 +182,6 @@ const REMOVED_SETTINGS: ReadonlyArray<[string, string]> = [
 export function removedSettingsIn(values: Record<string, string | undefined>): string[] {
   return REMOVED_SETTINGS.map(([key]) => key).filter(key => values[key] !== undefined);
 }
-const OS_VALUES: readonly ClientOs[] = ['mac'];
 
 let loggedLegacyDataDirNotice = false;
 
@@ -210,13 +212,28 @@ export function loadConfig(opts: { envPath?: string; env?: Record<string, string
     return v === undefined || v === '' ? undefined : v;
   };
 
-  const appVersion = pick('KAKAO_APP_VERSION') ?? DEFAULT_APP_VERSION;
+  const requestedType = pick('KAKAO_DEVICE_TYPE');
+  const boundType = pick('KAKAO_REGISTERED_DEVICE_TYPE');
+  for (const value of [requestedType, boundType]) if (value !== undefined && value !== 'pc' && value !== 'tablet') {
+    throw new KakaoError('CONFIG_INVALID', 'Device type must be pc or tablet');
+  }
+  // Old credentials are PC credentials. Changing a selector must never reinterpret a key.
+  const hasCredentials = ['KAKAO_REGISTERED_DEVICE_UUID', 'KAKAO_ACCESS_TOKEN', 'KAKAO_REFRESH_TOKEN', 'KAKAO_USER_ID'].some(k => pick(k) !== undefined);
+  const deviceType = (requestedType ?? boundType ?? 'pc') as DeviceType;
+  if ((hasCredentials && deviceType !== (boundType ?? 'pc')) || (boundType && requestedType && boundType !== requestedType)) {
+    throw new KakaoError('CONFIG_INVALID', 'Device type differs from registered credentials. Register a fresh identity in a separate configuration; do not relabel existing keys.');
+  }
+  if (deviceType === 'tablet' && pick('KAKAO_REGISTERED_DEVICE_UUID') && !/^[a-f0-9]{64}$/.test(pick('KAKAO_REGISTERED_DEVICE_UUID')!)) {
+    throw new KakaoError('CONFIG_INVALID', 'Tablet credentials require their own 64-character hexadecimal device key');
+  }
+  const profile = authConfigForDevice(deviceType);
+  const appVersion = pick('KAKAO_APP_VERSION') ?? profile.version;
   if (!/^\d+\.\d+\.\d+$/.test(appVersion)) {
     throw new KakaoError('CONFIG_INVALID', `KAKAO_APP_VERSION must look like 26.4.0, got "${appVersion}"`);
   }
-  const clientOs = (pick('KAKAO_CLIENT_OS') ?? 'mac') as ClientOs;
-  if (!OS_VALUES.includes(clientOs)) {
-    throw new KakaoError('CONFIG_INVALID', `KAKAO_CLIENT_OS must be one of ${OS_VALUES.join(', ')}, got "${clientOs}"`);
+  const clientOs = (pick('KAKAO_CLIENT_OS') ?? profile.agent) as ClientOs;
+  if (clientOs !== profile.agent) {
+    throw new KakaoError('CONFIG_INVALID', `KAKAO_CLIENT_OS must be one of ${profile.agent}, got "${clientOs}"`);
   }
   const lang = pick('KAKAO_LANG') ?? 'ko';
   if (!/^[a-z]{2}$/.test(lang)) {
@@ -259,7 +276,7 @@ export function loadConfig(opts: { envPath?: string; env?: Record<string, string
   return {
     credentials: {
       userId: pick('KAKAO_USER_ID'), accessToken: pick('KAKAO_ACCESS_TOKEN'), deviceUUID: pick('KAKAO_REGISTERED_DEVICE_UUID'),
-      refreshToken: pick('KAKAO_REFRESH_TOKEN'), email: pick('KAKAO_EMAIL'), password: pick('KAKAO_PASSWORD'), deviceName: pick('KAKAO_DEVICE_NAME')
+      refreshToken: pick('KAKAO_REFRESH_TOKEN'), email: pick('KAKAO_EMAIL'), password: pick('KAKAO_PASSWORD'), deviceName: pick('KAKAO_DEVICE_NAME'), deviceType
     },
     policy: {
       notifyChatId: pick('KAKAO_NOTIFY_CHAT_ID'), ceiling,

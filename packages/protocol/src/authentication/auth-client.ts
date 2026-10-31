@@ -6,6 +6,9 @@ export interface AuthClientConfig {
   osVersion: string;
   language: string;
   baseUrl: string;
+  /** Android API level used in device registration, distinct from the OS release. */
+  apiLevel?: string;
+  model?: string;
 }
 
 export const DEFAULT_AUTH_CONFIG: AuthClientConfig = {
@@ -15,6 +18,20 @@ export const DEFAULT_AUTH_CONFIG: AuthClientConfig = {
   language: 'ko',
   baseUrl: 'https://katalk.kakao.com'
 };
+
+export type DeviceType = 'pc' | 'tablet';
+
+/** Experimental tablet identity; server compatibility still requires operator validation. */
+export const TABLET_AUTH_CONFIG: AuthClientConfig = {
+  agent: 'android', version: '25.9.2', osVersion: '13', apiLevel: '33',
+  language: 'ko', baseUrl: 'https://katalk.kakao.com', model: 'SM-T870'
+};
+export function authConfigForDevice(type: DeviceType = 'pc'): AuthClientConfig {
+  return { ...(type === 'tablet' ? TABLET_AUTH_CONFIG : DEFAULT_AUTH_CONFIG) };
+}
+export function calculateAndroidXVC(userAgent: string, email: string): string {
+  return crypto.createHash('sha512').update(`BARD|${userAgent}|DANTE|${email}|SIAN`).digest('hex').slice(0, 16);
+}
 
 /**
  * User-Agent platform token, e.g. `KT/26.4.0 Mc/26.3.1 ko` — macOS uses `Mc`, Windows `Wd`.
@@ -83,7 +100,7 @@ export class KakaoAuthClient {
   constructor(deviceName: string, deviceUUID: string, config: Partial<AuthClientConfig> = {}) {
     this.deviceName = deviceName;
     this.deviceUUID = deviceUUID;
-    this.config = { ...DEFAULT_AUTH_CONFIG, ...config };
+    this.config = { ...(config.agent === 'android' ? TABLET_AUTH_CONFIG : DEFAULT_AUTH_CONFIG), ...config };
   }
 
   get userAgent(): string {
@@ -102,7 +119,7 @@ export class KakaoAuthClient {
 
   private createHeaders(email: string, contentType = 'application/x-www-form-urlencoded'): Record<string, string> {
     const ua = this.userAgent;
-    const xvc = calculateXVC(this.deviceUUID, ua, email);
+    const xvc = this.config.agent === 'android' ? calculateAndroidXVC(ua, email) : calculateXVC(this.deviceUUID, ua, email);
 
     return {
       'A': `${this.config.agent}/${this.config.version}/${this.config.language}`,
@@ -157,7 +174,7 @@ export class KakaoAuthClient {
       method: 'POST',
       headers,
       body: body.toString(),
-      ...(endpoint === 'login.json' ? { signal: AbortSignal.timeout(15000) } : {})
+      signal: AbortSignal.timeout(15000)
     });
 
     return this.parseResponse<T>(url, res);
@@ -170,7 +187,8 @@ export class KakaoAuthClient {
     const res = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(jsonBody)
+      body: JSON.stringify(jsonBody),
+      signal: AbortSignal.timeout(15000)
     });
 
     return this.parseResponse<T>(url, res);
@@ -203,6 +221,12 @@ export class KakaoAuthClient {
    * Attempt primary login with email and password
    */
   async login(email: string, password: string, forced = false, permanent = true): Promise<AuthResult<LoginSuccessData>> {
+    if (this.config.agent === 'android') {
+      return this.requestForm<LoginSuccessData>('login.json', email, {
+        email, password, model_name: this.config.model ?? 'SM-T870',
+        permanent: String(permanent), forced: String(forced)
+      });
+    }
     // Body: device_name, device_uuid, email, os_version, password, permanent=1. Takeover is a separate explicit opt-in.
     return this.requestForm<LoginSuccessData>('login.json', email, {
       email,
@@ -225,8 +249,8 @@ export class KakaoAuthClient {
       device: {
         name: this.deviceName,
         uuid: this.deviceUUID,
-        osVersion: this.config.osVersion,
-        model: 'MacBookPro'
+        osVersion: this.config.apiLevel ?? this.config.osVersion,
+        model: this.config.model ?? 'MacBookPro'
       },
       permanent
     });
@@ -255,8 +279,8 @@ export class KakaoAuthClient {
       device: {
         name: this.deviceName,
         uuid: this.deviceUUID,
-        osVersion: this.config.osVersion,
-        model: 'MacBookPro'
+        osVersion: this.config.apiLevel ?? this.config.osVersion,
+        model: this.config.model ?? 'MacBookPro'
       },
       permanent: true
     });
@@ -329,10 +353,15 @@ export class KakaoAuthClient {
       refresh_token: refreshToken
     });
 
+    const tablet = this.config.agent === 'android';
+    if (tablet) {
+      headers['Content-Type'] = 'application/json; charset=utf-8';
+      Object.assign(headers, { C: crypto.randomUUID(), Connection: 'Close' });
+    }
     const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: body.toString()
+      method: 'POST', headers,
+      body: tablet ? JSON.stringify(Object.fromEntries(body)) : body.toString(),
+      signal: AbortSignal.timeout(15000)
     });
 
     const parsed = await this.parseResponse<Record<string, unknown>>(url, res);

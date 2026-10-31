@@ -4,7 +4,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { KakaoError, parseAllowedUids, removedSettingsIn, isMainModule, installRoot, packagedEntry } from '@kakao-max/core';
+import { KakaoError, parseAllowedUids, loadConfig, removedSettingsIn, isMainModule, installRoot, packagedEntry } from '@kakao-max/core';
 import { parseEnv } from '../../../packages/core/src/env-file.ts';
 import { configureManagedLogin, readManagedEnv } from './managed-login.ts';
 import { terminalPrompt } from './setup-prompts.ts';
@@ -106,6 +106,8 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
     // The new daemon refuses removed settings; say so now instead of stopping a working daemon for a start that fails.
     const retired = removedSettingsIn(saved);
     if (retired.length) throw new KakaoError('CONFIG_INVALID', `Settings file still has removed keys (${retired.join(', ')}); delete those lines from ${env}, then update again. Nothing was stopped`);
+    const identity = loadConfig({ envPath: env, env: saved }).credentials.deviceType;
+    if (identity !== (state.deviceType ?? 'pc')) throw new KakaoError('CONFIG_INVALID', 'Registered device type differs from the installation manifest; nothing was stopped');
     // New daemons serve MCP TCP only to allowed OS users; without the setting only root and the service user could connect.
     if (saved.KAKAO_MCP_ALLOWED_UIDS !== undefined) parseAllowedUids(saved.KAKAO_MCP_ALLOWED_UIDS);
     else throw new KakaoError('CONFIG_INVALID', `Add KAKAO_MCP_ALLOWED_UIDS=<uid of the SSH user your MCP client connects as> to ${env}, then update again. Nothing was stopped`);

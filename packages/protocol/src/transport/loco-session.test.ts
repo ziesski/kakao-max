@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
+import { EventEmitter } from 'node:events';
 import { BSON } from 'bson';
 import { LocoSession, MediaType, ChatMetaType } from './loco-session.js';
 import { parseEmoticonAttachment, parseLoginList } from './loco-parse.js';
@@ -533,4 +535,25 @@ test('media reuse keeps legacy callers unchanged and opt-in publication resolves
   assert.deepEqual(calls.map(c => c.method), ['SHIP', 'SHIP', 'GETTRAILER']);
   assert.equal(calls.at(-1)?.body.k, 'fixture-reuse-token');
   assert.equal(calls.some(c => c.method === 'WRITE'), false);
+});
+
+
+test('tablet connects with Android LOGINLIST identity and keeps that identity in media publication', async t => {
+  const socket = Object.assign(new EventEmitter(), { write: () => true, setTimeout: () => {}, destroy: () => {} });
+  t.mock.method(net, 'connect', (_options: unknown, connected: () => void) => {
+    queueMicrotask(connected); return socket;
+  });
+  const session = new LocoSession({ os: 'android', appVersion: '25.9.2', pingIntervalMs: 0 });
+  const calls: Array<{ method: string; body: Record<string, any> }> = [];
+  t.mock.method(session, 'request', async (method: string, body: Record<string, any>) => {
+    calls.push({ method, body }); return { header: { status: 0 }, data: { status: 0 } };
+  });
+  await session.connect('fixture.invalid', 1234, '42', 'fixture-token', 'a'.repeat(64));
+  assert.equal(calls[0].method, 'LOGINLIST');
+  assert.equal(calls[0].body.os, 'android'); assert.equal(calls[0].body.appVer, '25.9.2');
+  assert.equal(calls[0].body.duuid, 'a'.repeat(64)); assert.equal(calls[0].body.dtype, 2);
+  assert.equal(calls[0].body.MCCMNC, '99999');
+  assert.deepEqual([...calls[0].body.rp.buffer], [0, 0, 255, 255, 0, 0]);
+  await session.sendMediaPost({ chatId: '10', userId: '42', token: 'fixture', type: MediaType.Photo, size: 1 });
+  assert.equal(calls[1].body.os, 'android'); assert.equal(calls[1].body.av, '25.9.2');
 });

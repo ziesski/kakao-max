@@ -4,6 +4,13 @@
 > **완료(✅)는 현재 도구로 실계정에서 검증된 것만 센다.** `apps/mcp/src/capability-matrix.test.ts`가
 > 등록된 모든 MCP 도구가 이 표에 있는지, 없어진 도구가 남아 있지 않은지 검사한다.
 
+## 연결 방식
+
+| 방식 | 상태 | 검증 범위 |
+|---|---|---|
+| PC (기본) | ✅ | 아래 실계정 증거의 연결 방식 |
+| Android 태블릿 (선택) | 🟡 | 인증 요청·기기 키 유지·재로그인·충돌 중단 fixture. 실제 인증·공식 PC와 동시 접속·기능별 호환 ❓. [안내](runbooks/tablet-connection.md) |
+
 ## 도구 표면
 
 - 기본 도구 16개는 항상 보인다. 고급 도구는 `KAKAO_MCP_TOOL_GROUPS=chats,friends,events,vault`로 켠 묶음만 존재한다(꺼진 도구는 호출도 안 된다).

@@ -20,12 +20,12 @@
 //   KAKAO_DEVICE_NAME device label (default below)
 //
 // Run:  npm run register --workspace=@kakao-max/mcp
-// Safe to re-run; it rewrites only the KAKAO_* keys it owns. Zero runtime deps;
+// Existing credentials are refused; use an empty, separate configuration for a new device. Zero runtime deps;
 // runs under `node --experimental-strip-types` (no TS parameter properties / enums).
 // ----------------------------------------------------------------------------
 
-import { KakaoDeviceRegistration, type SignRegistrationResult } from '@kakao-max/protocol';
-import { CredentialStore, isMainModule, setupCommand } from '@kakao-max/core';
+import { KakaoDeviceRegistration, authConfigForDevice, type DeviceType, type SignRegistrationResult } from '@kakao-max/protocol';
+import { CredentialStore, KakaoError, loadConfig, isMainModule, setupCommand } from '@kakao-max/core';
 
 /** Default device label shown in the account's 인증 기기 관리 (device management) list. */
 export const DEFAULT_DEVICE_NAME = 'KakaoWeb-MCP';
@@ -36,6 +36,7 @@ export interface RegistrationPersistInput {
   credentials?: { userId?: string; accessToken?: string; refreshToken?: string };
   email?: string;
   deviceName?: string;
+  deviceType?: DeviceType;
 }
 
 /**
@@ -55,7 +56,8 @@ export function persistRegistration(input: RegistrationPersistInput): void {
     refreshToken: input.credentials?.refreshToken,
     deviceUUID: input.deviceUuid,
     email: input.email,
-    deviceName: input.deviceName
+    deviceName: input.deviceName,
+    deviceType: input.deviceType ?? 'pc'
   });
 }
 
@@ -70,18 +72,23 @@ export function describeResult(res: SignRegistrationResult): string {
 async function main(): Promise<void> {
   const log = (line: string) => process.stderr.write(`[register] ${line}\n`);
 
-  const { email, password, deviceName, envPath } = CredentialStore.readOptional();
+  const config = loadConfig();
+  if (config.credentials.deviceUUID || config.credentials.accessToken || config.credentials.userId || config.credentials.refreshToken) {
+    throw new KakaoError('CONFIG_INVALID', 'Existing device credentials found. Use a separate configuration for a new registration; existing keys were retained.');
+  }
+  const { email, password, deviceName, deviceType, envPath } = CredentialStore.readOptional();
   if (!email || !password) {
     log('Missing KAKAO_EMAIL / KAKAO_PASSWORD. Set them in .env.local (password is sensitive —');
     log(`.env.local only), then re-run. ${setupCommand()} does this for a new Linux install.`);
     process.exit(1);
   }
-  const name = deviceName || DEFAULT_DEVICE_NAME;
+  const name = deviceName || (deviceType === 'tablet' ? 'SM-T870' : DEFAULT_DEVICE_NAME);
 
   log('Registering a new device key; phone approval is required. Another active PC session may conflict.');
-  const reg = new KakaoDeviceRegistration(name);
+  const reg = new KakaoDeviceRegistration(name, { ...authConfigForDevice(deviceType), version: config.client.appVersion, language: config.client.lang });
 
   const res = await reg.register(email, password, {
+    onPasscode: info => log(`Phone approval code: ${info.passcode} (${Math.floor(info.remainingSeconds)} seconds)`),
     onAwaitingApproval: (info) => {
       log('──────────────────────────────────────────────────────────────');
       log('Approve this login on your phone now.');
@@ -97,7 +104,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  persistRegistration({ envPath, deviceUuid: res.deviceUuid, credentials: res.credentials, email, deviceName: name });
+  persistRegistration({ envPath, deviceUuid: res.deviceUuid, credentials: res.credentials, email, deviceName: name, deviceType });
   log(describeResult(res));
   log('Saved device credentials. The MCP server can now start.');
   process.exit(0);

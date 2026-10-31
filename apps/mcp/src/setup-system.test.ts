@@ -23,6 +23,7 @@ function fixture(t: { after(fn: () => void): void }) {
     reason: 'fixture self-hosted bootstrap',
     log: s => logs.push(s), prompt: async (_q, secret) => {
       assert.ok(!_q.includes('PREPARE') && !_q.includes('LOGIN'), 'no redundant installation or login confirmation');
+      if (_q.startsWith('연결 기기 유형')) return '';
       if (_q.startsWith('자동 재로그인을 위해')) return rememberLogin ? 'y' : '';
       const value = answers.shift() ?? '';
       if (value === PASSWORD) assert.equal(secret, true);
@@ -247,4 +248,28 @@ test('explicit automatic re-login opt-in saves only this installation login data
   assert.equal(fs.statSync(path.join(f.root, 'app/.env.local')).mode & 0o777, 0o600);
   const trace = JSON.stringify({ commands: f.commands, logs: f.logs });
   for (const secret of [EMAIL, PASSWORD, TOKEN]) assert.ok(!trace.includes(secret));
+});
+
+test('tablet bootstrap persists its identity across an interrupted approval and never offers takeover', async t => {
+  const f = fixture(t); const prompt = f.host.prompt;
+  f.host.prompt = async (q, secret) => q.startsWith('연결 기기 유형') ? 'tablet' : prompt(q, secret);
+  f.statuses([-142]);
+  await assert.rejects(bootstrapLocal(f.host), { code: 'APPROVAL_REQUIRED' });
+  const uuid = f.state().deviceUuid;
+  assert.equal(f.state().deviceType, 'tablet'); assert.match(uuid, /^[a-f0-9]{64}$/);
+  f.answers([EMAIL, PASSWORD]); f.statuses([-101]);
+  f.host.prompt = async (q, secret) => {
+    assert.ok(!q.startsWith('연결 기기 유형') && !q.startsWith('기존 PC를 로그아웃'));
+    return prompt(q, secret);
+  };
+  await assert.rejects(bootstrapLocal(f.host), { code: 'PC_SESSION_CONFLICT' });
+  assert.deepEqual(f.registrations.map(r => r.takeover), [false, false]);
+  assert.ok(f.registrations.every(r => r.uuid === uuid));
+  assert.ok(!fs.existsSync(path.join(f.root, 'app/.env.local')));
+  f.answers([EMAIL, PASSWORD]); await bootstrapLocal(f.host);
+  assert.match(f.env(), /KAKAO_REGISTERED_DEVICE_TYPE=tablet/);
+  assert.match(f.env(), /KAKAO_DEVICE_NAME=SM-T870/);
+  assert.equal(f.state().deviceType, 'tablet');
+  const count = f.registrations.length;
+  await bootstrapLocal(f.host); assert.equal(f.registrations.length, count);
 });

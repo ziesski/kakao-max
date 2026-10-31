@@ -124,3 +124,22 @@ test('late polls cannot advance the cursor after an explicit history refresh', a
   await f.conversation.poll();
   assert.deepEqual(cursors, [0, 0, 2]);
 });
+
+
+test('refresh retries only the latest valid requested room and respects room visibility', async () => {
+  const f = fixture(); await f.conversation.start();
+  const calls: string[] = [];
+  f.reader.history = async room => { calls.push(room); throw new Error('fixture denied'); };
+  await assert.rejects(f.conversation.open('1'));
+  await assert.rejects(f.conversation.open('2'));
+  await assert.rejects(f.conversation.refresh());
+  assert.deepEqual(calls, ['1', '2', '2']);
+  await assert.rejects(f.conversation.open('missing'), { code: 'ROOM_NOT_AVAILABLE' });
+  await f.conversation.refresh();
+  assert.deepEqual(calls, ['1', '2', '2']);
+  const hidden = new Conversation(f.reader, f.writer, () => {}, () => false);
+  await hidden.start();
+  await assert.rejects(hidden.open('1'), { code: 'ROOM_NOT_AVAILABLE' });
+  await hidden.refresh();
+  assert.deepEqual(calls, ['1', '2', '2']);
+});

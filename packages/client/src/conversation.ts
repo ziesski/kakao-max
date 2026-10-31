@@ -138,6 +138,7 @@ export class Conversation {
     try { await promise; } finally { if (this.pollRequest?.promise === promise) this.pollRequest = undefined; }
   }
   private failRead(error: unknown): void {
+    this.generation++;
     this.stopWatch();
     this._live = false;
     const code = (error as { code?: unknown })?.code;

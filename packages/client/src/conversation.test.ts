@@ -201,3 +201,16 @@ test('bounded update pages drain completely after one event', async () => {
   notify(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 3); assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10', '11', '12', '13']); f.conversation.close();
 });
+
+test('subscription revocation invalidates a content response already in flight', async () => {
+  const f = fixture(); let notify!: () => void, revoke!: (error: Error) => void;
+  f.reader.watch = async (_room, changed, failed) => { notify = changed; revoke = failed; return () => {}; };
+  f.reader.updates = async () => ({ messages: [], removedIds: [], reset: false });
+  await f.conversation.start(); await f.conversation.open('1'); await new Promise(resolve => setImmediate(resolve));
+  let finish!: (value: any) => void;
+  f.reader.updates = () => new Promise(resolve => { finish = resolve; }); notify();
+  revoke(Object.assign(new Error('fixture revoked'), { code: 'POLICY_DENIED' }));
+  finish({ messages: [m(99, 'must stay hidden')], removedIds: [], reset: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.conversation.live, false); assert.deepEqual(f.conversation.messages, []); f.conversation.close();
+});

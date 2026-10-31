@@ -65,7 +65,7 @@ export class McpClient {
   async connect(): Promise<void> {
     if (this.connected) throw new Error('MCP client is already connected');
     await new Promise<void>((resolve, reject) => {
-      const s = net.connect(this.port, this.host, () => { s.setTimeout(0); resolve(); });
+      const s = net.connect(this.port, this.host, () => { s.setNoDelay(true); s.setTimeout(0); resolve(); });
       s.setTimeout(10000, () => s.destroy(new Error('MCP connection timed out')));
       s.once('error', reject);
       this.socket = s;

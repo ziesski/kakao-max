@@ -9,6 +9,11 @@ import { KakaoError } from '@kakao-max/core';
 
 const URI = 'kakao://rooms/2/messages';
 const settle = () => new Promise(resolve => setTimeout(resolve, 15));
+async function until(ready: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!ready() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(ready(), 'Expected transport state change before timeout');
+}
 async function fixture(t: any) {
   const server = new McpStdioServer({ name: 'fixture', version: '1' });
   let paused = false, allowed = true, reads = 0, seq = 0, subscribers = 0, raceHistory = false;
@@ -30,7 +35,7 @@ async function fixture(t: any) {
     return result;
   } });
   const sockets = new Set<net.Socket>();
-  const srv = net.createServer(socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); server.serveConnection(socket, socket); });
+  const srv = net.createServer(socket => { socket.setNoDelay(true); sockets.add(socket); socket.on('close', () => sockets.delete(socket)); server.serveConnection(socket, socket); });
   await new Promise<void>(resolve => srv.listen(0, '127.0.0.1', resolve));
   const c = new McpClient({ host: '127.0.0.1', port: (srv.address() as net.AddressInfo).port }); await c.connect();
   t.after(() => { c.close(); for (const socket of sockets) socket.destroy(); srv.close(); });
@@ -45,19 +50,19 @@ async function fixture(t: any) {
 test('room resource signals update a conversation without idle reads and release subscriptions on close', async t => {
   const f = await fixture(t), reader = new McpConversationReader(f.c);
   const conversation = new Conversation(reader, { identity: () => reader.status(), async send() { assert.fail('no write'); } }, () => {});
-  await conversation.start(); await conversation.open('2'); await settle();
+  await conversation.start(); await conversation.open('2'); await until(() => f.reads() >= 2);
   const idleReads = f.reads(); await settle(); assert.equal(f.reads(), idleReads);
   assert.equal(f.subscribers(), 1);
-  f.push(); await settle();
+  f.push(); await until(() => conversation.messages.length === 2);
   assert.deepEqual(conversation.messages.map(m => m.messageId), ['10', '11']);
   assert.equal(f.reads(), idleReads + 1);
-  conversation.close(); await settle(); assert.equal(f.subscribers(), 0);
+  conversation.close(); await until(() => f.subscribers() === 0); assert.equal(f.subscribers(), 0);
 });
 
 test('pause and revocation stop signals and clear the authorized view', async t => {
   const f = await fixture(t), reader = new McpConversationReader(f.c);
   const conversation = new Conversation(reader, { identity: () => reader.status(), async send() { assert.fail('no write'); } }, () => {});
-  await conversation.start(); await conversation.open('2'); await settle(); f.pause(); await settle();
+  await conversation.start(); await conversation.open('2'); await until(() => f.reads() >= 2); f.pause(); await until(() => !conversation.live && f.subscribers() === 0);
   assert.equal(conversation.live, false); assert.deepEqual(conversation.messages, []); assert.equal(f.subscribers(), 0);
   conversation.close();
 });
@@ -70,18 +75,18 @@ test('resource subscriptions require initialization, exact room URIs, a ceiling 
   const r = await f.c.request('resources/subscribe', { uri: URI }); assert.ok(r._meta.subscriptionId);
   await assert.rejects(f.c.request('resources/subscribe', { uri: 'kakao://rooms/4/messages' }), { code: 'RATE_LIMITED' });
   const notifications: any[] = []; f.c.onNotification((method, params) => notifications.push({ method, params }));
-  f.push(); await settle();
+  f.push(); await until(() => notifications.length === 1);
   assert.equal(notifications.length, 1); assert.equal(notifications[0].method, 'notifications/resources/updated');
   assert.ok(!JSON.stringify(notifications).includes('fixture new'));
-  f.drop(); await settle(); assert.equal(f.subscribers(), 0);
+  f.drop(); await until(() => f.subscribers() === 0); assert.equal(f.subscribers(), 0);
 });
 
 test('reconnect rechecks identity and catches up a bounded history without sending', async t => {
   const f = await fixture(t), reader = new McpConversationReader(f.c);
   const conversation = new Conversation(reader, { identity: () => reader.status(), async send() { assert.fail('no write'); } }, () => {});
-  await conversation.start(); await conversation.open('2'); await settle(); f.drop(); await settle();
+  await conversation.start(); await conversation.open('2'); await until(() => f.reads() >= 2); f.drop(); await until(() => !conversation.live && f.subscribers() === 0);
   assert.equal(conversation.live, false); assert.equal(conversation.messages.length, 1);
-  f.push(); await f.c.connect(); await conversation.start(); await conversation.refresh(); await settle();
+  f.push(); await f.c.connect(); await conversation.start(); await conversation.refresh(); await until(() => f.subscribers() === 1);
   assert.deepEqual(conversation.messages.map(m => m.messageId), ['10', '11']); assert.equal(f.subscribers(), 1);
   conversation.close();
 });
@@ -90,7 +95,7 @@ test('permission revocation stops and clears an existing subscription before any
   const f = await fixture(t), reader = new McpConversationReader(f.c);
   const conversation = new Conversation(reader, { identity: () => reader.status(), async send() { assert.fail('no write'); } }, () => {});
   await conversation.start(); await conversation.open('2'); await settle();
-  const before = f.reads(); f.deny(); await settle(); f.push(); await settle();
+  const before = f.reads(); f.deny(); await until(() => !conversation.live && f.subscribers() === 0); f.push(); await settle();
   assert.equal(conversation.live, false); assert.deepEqual(conversation.messages, []);
   assert.equal(f.reads(), before); assert.equal(f.subscribers(), 0); conversation.close();
 });
@@ -102,14 +107,14 @@ test('unsubscribing during async authorization cleans up a late subscription', a
     started = true; await new Promise<void>(resolve => { finish = resolve; }); return () => { stopped++; };
   } });
   const sockets = new Set<net.Socket>();
-  const srv = net.createServer(socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); server.serveConnection(socket, socket); });
+  const srv = net.createServer(socket => { socket.setNoDelay(true); sockets.add(socket); socket.on('close', () => sockets.delete(socket)); server.serveConnection(socket, socket); });
   await new Promise<void>(resolve => srv.listen(0, '127.0.0.1', resolve));
   const c = new McpClient({ host: '127.0.0.1', port: (srv.address() as net.AddressInfo).port }); await c.connect();
   t.after(() => { c.close(); for (const socket of sockets) socket.destroy(); srv.close(); });
   const pending = c.request('resources/subscribe', { uri: URI });
-  await settle(); assert.equal(started, true);
+  await until(() => started); assert.equal(started, true);
   await assert.rejects(c.request('resources/subscribe', { uri: URI }), { code: 'RATE_LIMITED' });
-  await c.request('resources/unsubscribe', { uri: URI }); finish(); await pending; await settle();
+  await c.request('resources/unsubscribe', { uri: URI }); finish(); await pending; await until(() => stopped === 1);
   assert.equal(stopped, 1);
 });
 
@@ -117,7 +122,7 @@ test('unsubscribing during async authorization cleans up a late subscription', a
 test('a message between the history snapshot and subscription is caught up exactly once', async t => {
   const f = await fixture(t), reader = new McpConversationReader(f.c); f.race();
   const conversation = new Conversation(reader, { identity: () => reader.status(), async send() { assert.fail('no write'); } }, () => {});
-  await conversation.start(); await conversation.open('2'); await settle();
+  await conversation.start(); await conversation.open('2'); await until(() => conversation.messages.length === 2);
   assert.deepEqual(conversation.messages.map(m => m.messageId), ['10', '11']);
   const calls = f.reads(); await settle(); assert.equal(f.reads(), calls); conversation.close();
 });

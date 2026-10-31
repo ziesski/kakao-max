@@ -101,7 +101,12 @@ export class Conversation {
     try { await promise; } finally { if (this.pollRequest?.promise === promise) this.pollRequest = undefined; }
   }
   private failRead(error: unknown): void {
-    this._live = false; this._messages = []; this._readError = error; this.changed();
+    this._live = false;
+    const code = (error as { code?: unknown })?.code;
+    // Keep the last authorized view on transport/budget failures. Permission,
+    // identity and malformed-response failures still discard displayed content.
+    if (!['RATE_LIMITED', 'NETWORK', 'TIMEOUT', 'NOT_CONNECTED'].includes(String(code))) this._messages = [];
+    this._readError = error; this.changed();
   }
   private merge(incoming: ConversationMessage[], removed: string[], reset: boolean): void {
     if (!Array.isArray(incoming) || incoming.some(m => !validId(m.messageId) || !validId(m.authorId)) || !Array.isArray(removed)) {

@@ -143,3 +143,32 @@ test('refresh retries only the latest valid requested room and respects room vis
   await hidden.refresh();
   assert.deepEqual(calls, ['1', '2', '2']);
 });
+
+
+test('read limits preserve history and a successful send appends without hiding the stopped read state', async () => {
+  const f = fixture(); await f.conversation.start(); await f.conversation.open('1');
+  const error = Object.assign(new Error('fixture read budget'), { code: 'RATE_LIMITED' });
+  f.setError(error);
+  await assert.rejects(f.conversation.poll(), e => e === error);
+  assert.equal(f.conversation.live, false);
+  assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10']);
+  await f.conversation.send('fixture reply');
+  assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10', '20']);
+  assert.equal(f.conversation.readError, error);
+  assert.equal(f.conversation.live, false);
+  f.setError(Object.assign(new Error('fixture revoked'), { code: 'POLICY_DENIED' }));
+  await assert.rejects(f.conversation.refresh());
+  assert.deepEqual(f.conversation.messages, []);
+});
+
+test('temporary read failures retain the last view until a successful explicit refresh', async () => {
+  for (const code of ['NETWORK', 'TIMEOUT', 'NOT_CONNECTED']) {
+    const f = fixture(); await f.conversation.start(); await f.conversation.open('1');
+    f.setError(Object.assign(new Error('fixture unavailable'), { code }));
+    await assert.rejects(f.conversation.refresh());
+    assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['10']);
+    f.setError(); f.setRows([m(11)]); await f.conversation.refresh();
+    assert.deepEqual(f.conversation.messages.map(m => m.messageId), ['11']);
+    assert.equal(f.conversation.live, true); assert.equal(f.conversation.readError, undefined);
+  }
+});

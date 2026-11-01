@@ -166,6 +166,22 @@ test('named operation tools refuse unapproved calls and commit only the exact ap
   assert.deepEqual(h.result(await h.call('create_direct_chat', create)).result, { chatId: '777777777', isNew: true });
 });
 
+test('mark_read stays blocked while paused and outside the operator ceiling, even after approval', async t => {
+  const h = harness(t);
+  assert.equal(h.code(await h.call('mark_read', { chatId: CHAT, watermark: '1', requestId: randomUUID() })), 'POLICY_DENIED');
+  h.policy.setPaused(false);
+  const read = { chatId: CHAT, watermark: '1', requestId: randomUUID() };
+  await h.approve('mark_read', read);
+  h.policy.setPaused(true);
+  assert.equal(h.code(await h.call('mark_read', read)), 'POLICY_DENIED');
+
+  const outside = harness(t, { cap: ['999999999'] }); outside.policy.setPaused(false);
+  const capped = { chatId: CHAT, watermark: '1', requestId: randomUUID() };
+  await outside.approve('mark_read', capped);
+  assert.equal(outside.code(await outside.call('mark_read', capped)), 'POLICY_DENIED');
+  assert.deepEqual([...h.effects, ...outside.effects], []);
+});
+
 test('optional groups are not listed or callable unless enabled', async t => {
   const h = harness(t, { groups: false });
   for (const name of NAMED_OPERATION_TOOLS) assert.equal((await h.call(name, { requestId: randomUUID() })).rpcError.code, -32602, name);

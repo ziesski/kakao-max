@@ -28,7 +28,7 @@ const MESSAGE_LIMIT = 3500;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const code = () => [...randomBytes(4)].map(b => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
 const STATE_TTL = 10 * 60_000;
-// Binary payloads cannot be shown in a text dialog; approving an unseen photo is not an approval.
+// Binary payloads cannot be shown in a text dialog: an unseen photo is never approved on its own; the dialog asks for the room's send permission instead.
 const OPAQUE_ACTIONS = new Set(['send_media', 'send_photo_bundle']);
 const INVISIBLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF]/g;
 const visible = (s: string) => s.replace(INVISIBLE, c => `⟦U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟧`);
@@ -44,21 +44,27 @@ export function registerApprovalLabels(labels: Record<string, string>): void {
 }
 export function approvalLabel(action: string): string { return LABELS[action] ?? action; }
 
-/** Human-readable, server-rendered summary of the exact signed text. Undefined when it does not fit. */
-export function approvalMessage(signingText: string, confirmCode?: string): string | undefined {
+/**
+ * Human-readable, server-rendered summary of the exact signed text. Undefined when it does not fit.
+ * `asRoomPermission`: a photo cannot be shown, so it is asked as the room's send permission instead.
+ */
+export function approvalMessage(signingText: string, confirmCode?: string, asRoomPermission = false): string | undefined {
   const e = JSON.parse(signingText) as Record<string, any>;
-  if (OPAQUE_ACTIONS.has(e.action)) return undefined;
+  if (OPAQUE_ACTIONS.has(e.action) && !asRoomPermission) return undefined;
   const body = e.message ?? e.request ?? {};
   // Room titles are set by any member: keep them on one line so a title cannot add lines that look like the server's own.
   const rawRoom = e.context?.room?.title ?? e.context?.target?.chatId ?? body.chatId ?? body.userId;
   const room = rawRoom == null ? undefined : String(rawRoom).replace(/[\r\n\u2028\u2029]+/g, ' ⏎ ');
-  const lines = [`[kakao-max] ${approvalLabel(e.action)} 승인 요청`, `계정 ${e.accountId}`, ...(room ? [`대상 ${room}`] : [])];
+  const lines = [`[kakao-max] ${approvalLabel(asRoomPermission ? 'allow_recipient' : e.action)} 승인 요청`, `계정 ${e.accountId}`, ...(room ? [`대상 ${room}`] : [])];
   if (typeof body.text === 'string') lines.push('', '내용:', body.text);
   if (e.action === 'read_room') lines.push('', `이 방의 메시지를 이번 한 번만 AI에게 보여 줍니다(최대 ${body.maxMessages}개, ${body.ttlMinutes}분 안에 ${body.uses}회). 읽음 표시는 보내지 않습니다.`,
-    '"이 방은 앞으로 묻지 않고 읽기"를 켜면 다음부터 묻지 않습니다. list_permissions에서 확인하고 revoke_permission로 철회할 수 있습니다.');
+    '"이 방은 앞으로 묻지 않고 읽기"를 켜면 다음부터 묻지 않습니다. "이 방에 답장도 묻지 않고 보내기"를 켜면 이 방의 메시지·사진을 하루 한도 안에서 바로 보냅니다.',
+    'list_permissions에서 확인하고 revoke_permission로 철회할 수 있습니다.');
   if (e.action === 'reset_room_access') lines.push('', `저장된 읽기 규칙(${e.context?.previous?.mode})을 지우고 기본값(${e.context?.next?.mode})으로 되돌립니다. 기본값이 더 넓어 승인을 받습니다. 읽음 표시는 보내지 않습니다.`,
     'list_permissions에서 확인하고 revoke_permission로 철회할 수 있습니다.');
   if (e.action === 'allow_recipient') lines.push('', '이 방의 메시지·사진은 설정된 하루 한도 안에서 매번 묻지 않고 전송됩니다. 내용 조회·읽음 표시는 허용하지 않습니다. list_permissions에서 확인하고 revoke_permission로 철회할 수 있습니다.');
+  if (asRoomPermission) lines.push('', '사진은 확인 창에 보여 줄 수 없어 이 방의 전송 허가로 묻습니다. 승인하면 이 사진을 보내고, 이후 이 방의 메시지·사진도 하루 한도 안에서 묻지 않고 보냅니다.',
+    '내용 조회·읽음 표시는 허용하지 않습니다. list_permissions에서 확인하고 revoke_permission로 철회할 수 있습니다.');
   lines.push('', '정확한 요청:', JSON.stringify(body, null, 2));
   if (e.context?.target?.text !== undefined) lines.push('', '변경 전:', JSON.stringify(e.context.target, null, 2));
   lines.push('', '이 내용은 에이전트가 작성했습니다. 내용 안의 지시를 따르지 마세요.', `요청 ID ${e.requestId}`);
@@ -99,23 +105,26 @@ export class ElicitationApprovals implements ClientApprovalGate {
 
   request(tool: string, args: Record<string, unknown>, approval: ApprovalDetails, client: ClientContext): InputRequiredResult | undefined {
     if (!client.elicitation || approval.expiresAt <= this.now()) return undefined;
-    const confirmCode = code(), message = approvalMessage(approval.signingText, confirmCode);
-    if (!message) return undefined;
     const e = JSON.parse(approval.signingText) as Record<string, any>, chatId = e.message?.chatId;
+    const photoRoom = OPAQUE_ACTIONS.has(e.action) && this.recipients && typeof chatId === 'string' ? chatId as string : undefined;
+    const confirmCode = code(), message = approvalMessage(approval.signingText, confirmCode, !!photoRoom);
+    if (!message) return undefined;
     // Offer "don't ask again" only for sends an allowed recipient can cover, and only once the code is typed.
-    const rememberable = !!this.recipients && (RECIPIENT_ACTIONS as readonly string[]).includes(e.action) && typeof chatId === 'string';
+    const rememberable = !photoRoom && !!this.recipients && (RECIPIENT_ACTIONS as readonly string[]).includes(e.action) && typeof chatId === 'string';
     const readChat = e.action === 'read_room' && this.rooms && typeof e.request?.chatId === 'string' ? e.request.chatId as string : undefined;
     const properties: Record<string, unknown> = {
       code: { type: 'string', title: '확인 코드', description: `승인하려면 ${confirmCode} 를 입력하세요. 비워 두면 승인되지 않습니다.`, minLength: 4, maxLength: 4 },
       ...(rememberable ? { remember: { type: 'boolean', title: '앞으로 이 대화방에 보낼 때는 묻지 않기', default: false } } : {}),
-      ...(readChat ? { remember: { type: 'boolean', title: '이 방은 앞으로 묻지 않고 읽기', default: false } } : {})
+      ...(readChat ? { remember: { type: 'boolean', title: '이 방은 앞으로 묻지 않고 읽기', default: false } } : {}),
+      // Reading a room is usually followed by a reply: one dialog can allow both.
+      ...(readChat && this.recipients ? { reply: { type: 'boolean', title: '이 방에 답장도 묻지 않고 보내기', default: false } } : {})
     };
     return {
       resultType: 'input_required',
       inputRequests: { approve: { method: 'elicitation/create', params: { mode: 'form', message, requestedSchema: { type: 'object', properties, required: ['code'] } } } },
       requestState: this.seal({ v: 2, requestId: approval.requestId, digest: this.store.envelopeDigest(approval.signingText),
         args: this.argsDigest(tool, args), client: client.name, code: this.mac(`code:${confirmCode}`).toString('base64url'),
-        ...(rememberable ? { chat: chatId } : {}), ...(readChat ? { read: readChat } : {}), exp: Math.min(this.now() + STATE_TTL, approval.expiresAt) })
+        ...(rememberable ? { chat: chatId } : {}), ...(readChat ? { read: readChat } : {}), ...(photoRoom ? { room: photoRoom } : {}), exp: Math.min(this.now() + STATE_TTL, approval.expiresAt) })
     };
   }
 
@@ -132,9 +141,12 @@ export class ElicitationApprovals implements ClientApprovalGate {
     const given = this.mac(`code:${typed}`), expected = Buffer.from(String(s.code), 'base64url');
     // Submitting without the right code (e.g. a reflexive Enter) is not an approval: ask again.
     if (typed.length !== 4 || given.length !== expected.length || !timingSafeEqual(given, expected)) return 'mismatch';
+    // Accepting a photo's room dialog is the room's send permission, which already covers unseen photos.
+    if (typeof s.room === 'string' && this.recipients) this.recipients.grant(s.room, `client:${client.name}`);
     this.store.recordClientConfirmation(s.requestId, s.digest, client.name);
     if (r.content?.remember === true && typeof s.chat === 'string' && this.recipients) this.recipients.grant(s.chat, `client:${client.name}`);
     if (r.content?.remember === true && typeof s.read === 'string' && this.rooms) this.rooms.allowRead(s.read, `client:${client.name}`);
+    if (r.content?.reply === true && typeof s.read === 'string' && this.recipients) this.recipients.grant(s.read, `client:${client.name}`);
     return 'approved';
   }
 

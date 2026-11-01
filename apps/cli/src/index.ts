@@ -549,7 +549,7 @@ ${c.bold}사용 가능한 명령어:${c.reset}
   ${c.cyan}kakao help${c.reset}                              도움말 보기
   ${c.cyan}kakao --version${c.reset}                         설치된 kakao-max 버전 보기
   ${c.cyan}kakao setup${c.reset} [--doctor|--repair|--update]   데몬 설치·연결 마법사
-  ${c.cyan}kakao web${c.reset}                               내 브라우저용 로컬 웹 화면 시작
+  ${c.cyan}kakao web${c.reset} [--ssh user@server]              내 브라우저용 로컬 웹 화면 시작(--ssh: 서버의 데몬)
   ${c.cyan}kakao approver${c.reset} enroll|list|remove <id>     승인 패스키 관리(데몬 서버 터미널)
 
 ${c.bold}대화방 지정 옵션 (<대화방>):${c.reset}

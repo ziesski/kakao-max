@@ -8,6 +8,7 @@ import { McpBridge, type McpToolError } from './mcp-bridge.ts';
 import { ApprovalRelay } from './approval-relay.ts';
 import { isRequestId, writeFailure, MISSING_REQUEST_ID, NOT_CONNECTED } from './write-request.ts';
 import { controlRoute } from './control-panel.ts';
+import { parseWebArgs, describeEndpoint, sshOpener, WEB_USAGE, type DaemonEndpoint } from './daemon-endpoint.ts';
 import { fetchOg, type OgPreview } from './og.ts';
 // Only the program-location helper: the GUI never loads the account core.
 import { packagedEntry } from '../../../packages/core/src/entry.ts';
@@ -63,13 +64,23 @@ function broadcast(event: string, data: unknown) {
   for (const res of sseClients) res.write(payload);
 }
 
-// MCP client of the daemon (KAKAO_MCP_LISTEN, default 127.0.0.1:8787; a remote daemon via an SSH tunnel).
-const mcpHost = process.env.MCP_HOST || '127.0.0.1';
-const mcpPort = Number(process.env.MCP_PORT || 8787);
-const bridge = new McpBridge({ host: mcpHost, port: mcpPort });
+// MCP client of the daemon (KAKAO_MCP_LISTEN, default 127.0.0.1:8787; a remote daemon with --ssh).
+// --ssh <host> reaches a daemon on a server through `ssh -W` (no remote shell, no local tunnel port).
+let daemonEndpoint: DaemonEndpoint;
+try {
+  daemonEndpoint = parseWebArgs(process.argv.slice(2), process.env);
+} catch (e) {
+  console.error(`[server] ${(e as Error).message}\n${WEB_USAGE}`);
+  process.exit(2);
+}
+const endpointLabel = describeEndpoint(daemonEndpoint);
+const bridge = new McpBridge({
+  host: daemonEndpoint.host, port: daemonEndpoint.port,
+  ...(daemonEndpoint.ssh ? { open: sshOpener({ ...daemonEndpoint, ssh: daemonEndpoint.ssh }) } : {})
+});
 
 bridge.on('connected', async () => {
-  console.log(`[bridge] connected to MCP session at ${mcpHost}:${mcpPort}`);
+  console.log(`[bridge] connected to MCP session at ${endpointLabel}`);
   await syncFromBridge();
 });
 
@@ -657,7 +668,7 @@ async function main() {
     console.log(`[server] web UI ready. Open this link (do not share it): http://127.0.0.1:${port}/launch?t=${LAUNCH_SECRET}`);
   });
 
-  console.log(`[server] connecting to MCP session at ${mcpHost}:${mcpPort}...`);
+  console.log(`[server] connecting to MCP session at ${endpointLabel}...`);
   try {
     await bridge.connect();
     console.log('[server] MCP bridge connected.');

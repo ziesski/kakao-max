@@ -1,6 +1,7 @@
 import net from 'node:net';
 import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
+import type { Duplex } from 'node:stream';
 
 /** A kakao-max tool error; APPROVAL_REQUIRED carries the passkey page link when the daemon has one. */
 export class McpToolError extends Error {
@@ -71,6 +72,11 @@ export interface McpBridgeOptions {
   initTimeoutMs?: number;
   /** How long one tool call may take, including a confirmation dialog the person answers (default 150000). */
   callTimeoutMs?: number;
+  /**
+   * Opens one daemon connection some other way than TCP to host:port (e.g. `ssh -W` stdio forwarding).
+   * The stream is used at once; a stream that closes counts as a dropped connection and is reopened.
+   */
+  open?: () => Duplex;
 }
 
 export interface ChatMetaResponse {
@@ -82,7 +88,8 @@ export interface ChatMetaResponse {
 }
 
 export class McpBridge extends EventEmitter {
-  private socket?: net.Socket;
+  private socket?: Duplex;
+  private readonly open?: () => Duplex;
   private rl?: readline.Interface;
   private reqId = 0;
   private pending = new Map<number, { resolve: (val: any) => void; reject: (err: Error) => void }>();
@@ -109,6 +116,7 @@ export class McpBridge extends EventEmitter {
     this.reconnectDelayMs = opts.reconnectDelayMs ?? 3000;
     this.initTimeoutMs = opts.initTimeoutMs ?? 10000;
     this.callTimeoutMs = opts.callTimeoutMs ?? 150000;
+    this.open = opts.open;
   }
 
   get isConnected(): boolean {
@@ -141,7 +149,7 @@ export class McpBridge extends EventEmitter {
         }
       };
 
-      const s = net.connect(this.port, this.host, async () => {
+      const ready = async () => {
         this.socket = s;
         this.rl = readline.createInterface({ input: s });
         this.rl.on('line', (line) => this.onLine(line));
@@ -161,7 +169,16 @@ export class McpBridge extends EventEmitter {
           s.destroy();
           finishConnect(e as Error);
         }
-      });
+      };
+      let s: Duplex;
+      try {
+        s = this.open ? this.open() : net.connect(this.port, this.host, () => void ready());
+      } catch (e) {
+        finishConnect(e as Error);
+        this.scheduleReconnect();
+        return;
+      }
+      if (this.open) void ready();
 
       s.on('error', (err) => {
         this.emit('error', err);

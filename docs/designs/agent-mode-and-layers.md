@@ -238,10 +238,12 @@ AI가 설치를 대신할 때도 이 문장을 바꾸지 않고 이용자에게 
   pause 해제, 방 읽기·전송 허가, 읽기 grant, 방 만들기, 톡클라우드는 두 모드 모두 사람 승인이다.
 - `get_status`의 `agentMode`·`roomContentDefault`, 모드별 서버 instructions(`apps/mcp/src/instructions.ts`).
 - 운영자 명령 `npm run setup -- --mode ask|trust [--accept-risk] [--env 경로]`: `--accept-risk` 없는 trust는 §5 문장만 출력하고 멈춘다.
-  자동 저장이 켜진 상태에서 `ask`로 바꾸는 것은 거절한다. 적용하려면 데몬을 다시 시작해야 한다.
+  자동 저장이 켜진 상태에서 `ask`로 바꾸는 것은 거절한다. 관리형 설치가 있는 서버에서는 `--env` 없이도 서비스의 설정 파일에
+  sudo로 저장하고, 사람이 확인하면 서비스를 다시 시작한다(실행 중 일시정지는 풀린다는 안내와 함께).
+- 설치(bootstrap) 흐름이 로그인 성공 뒤 모드를 묻는다(2026-10-31). Enter는 `ask`, `trust`는 §5 문장을 보여 주고 다시 확인한다.
 - 공개용 `AGENTS.md`에 모드 규칙을 더했다.
 
-아직 안 됨: 설치(bootstrap) 흐름 안의 모드 질문, `--json` 출력과 `humanRequired` 표시, 설치 기록(선택 시각·방법),
+아직 안 됨: `--json` 출력과 `humanRequired` 표시, 설치 기록(선택 시각·방법),
 AI 설치자 안내문(§8), 결정 2·3·8. 자동 작업은 아직 없으므로 `automationMaxTier`는 설정값으로만 존재한다.
 
 ## 11. 검증 범위

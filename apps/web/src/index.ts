@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpBridge, type McpToolError } from './mcp-bridge.ts';
 import { ApprovalRelay } from './approval-relay.ts';
+import { isRequestId, writeFailure, MISSING_REQUEST_ID, NOT_CONNECTED } from './write-request.ts';
 import { fetchOg, type OgPreview } from './og.ts';
 // Only the program-location helper: the GUI never loads the account core.
 import { packagedEntry } from '../../../packages/core/src/entry.ts';
@@ -281,10 +282,10 @@ function sendJson(res: http.ServerResponse, code: number, body: unknown) {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(s), 'Cache-Control': 'no-store' });
   res.end(s);
 }
-/** A failed daemon write: keep its code and, for APPROVAL_REQUIRED, the passkey link the person can open. */
-function sendToolError(res: http.ServerResponse, e: unknown) {
-  const err = e as McpToolError;
-  return sendJson(res, err.code === 'APPROVAL_REQUIRED' ? 403 : 502, { error: err.message, code: err.code, approvalUrl: err.approvalUrl });
+/** A failed daemon write: a stable code, whether the outcome is unknown, and for APPROVAL_REQUIRED the passkey link. */
+function sendToolError(res: http.ServerResponse, e: unknown, requestId?: string) {
+  const { status, body } = writeFailure(e, requestId);
+  return sendJson(res, status, body);
 }
 function readBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve) => {
@@ -346,10 +347,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (p === '/api/send' && req.method === 'POST') {
-      const { chatId, text, reply, mentions } = await readBody(req);
+      const { chatId, text, reply, mentions, requestId } = await readBody(req);
       if (!chatId || !text) return sendJson(res, 400, { error: 'chatId and text required' });
+      if (!isRequestId(requestId)) return sendJson(res, 400, MISSING_REQUEST_ID);
       // Never show an unsent message as sent: a refused or failed send returns its error instead of a placeholder id.
-      if (!bridge.isConnected) return sendJson(res, 503, { error: 'bridge not connected' });
+      if (!bridge.isConnected) return sendJson(res, 503, NOT_CONNECTED);
       let w: any;
       try {
         const replyArg =
@@ -360,10 +362,10 @@ const server = http.createServer(async (req, res) => {
           Array.isArray(mentions) && mentions.length
             ? mentions.map((m: any) => ({ userId: String(m.userId), at: m.at, len: Number(m.len) }))
             : undefined;
-        w = await bridge.sendMessage(String(chatId), String(text), { reply: replyArg, mentions: mentionsArg });
+        w = await bridge.sendMessage(requestId, String(chatId), String(text), { reply: replyArg, mentions: mentionsArg });
       } catch (e) {
         console.warn(`[server] send failed via bridge: ${(e as Error).message}`);
-        return sendToolError(res, e);
+        return sendToolError(res, e, requestId);
       }
       const c = chats.get(String(chatId));
       const isDirect = !c?.isGroup || (c?.memberCount || 2) <= 2;
@@ -398,16 +400,17 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ...w, sendAt: now, unreadCount: initialUnread });
     }
     if (p === '/api/read' && req.method === 'POST') {
-      const { chatId, watermark, confirm } = await readBody(req);
+      const { chatId, watermark, confirm, requestId } = await readBody(req);
       if (confirm !== true) return sendJson(res, 403, { error: 'Read receipts require separate explicit approval (confirm=true)' });
       if (!chatId || !watermark) return sendJson(res, 400, { error: 'chatId and watermark required' });
+      if (!isRequestId(requestId)) return sendJson(res, 400, MISSING_REQUEST_ID);
       if (bridge.isConnected) {
         try {
-          await bridge.markRead(String(chatId), String(watermark));
+          await bridge.markRead(requestId, String(chatId), String(watermark));
         } catch (e) {
-          return sendToolError(res, e);
+          return sendToolError(res, e, requestId);
         }
-      } else return sendJson(res, 503, { error: 'bridge not connected' });
+      } else return sendJson(res, 503, NOT_CONNECTED);
       const c = chats.get(String(chatId));
       if (c) {
         c.unreadCount = 0;
@@ -421,26 +424,28 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
     if (p === '/api/delete' && req.method === 'POST') {
-      const { chatId, logId } = await readBody(req);
+      const { chatId, logId, requestId } = await readBody(req);
       if (!chatId || !logId) return sendJson(res, 400, { error: 'chatId and logId required' });
-      if (!bridge.isConnected) return sendJson(res, 503, { error: 'not connected' });
+      if (!isRequestId(requestId)) return sendJson(res, 400, MISSING_REQUEST_ID);
+      if (!bridge.isConnected) return sendJson(res, 503, NOT_CONNECTED);
       try {
-        const r = await bridge.deleteMessage(String(chatId), String(logId));
+        const r = await bridge.deleteMessage(requestId, String(chatId), String(logId));
         if (r.status === 0) broadcast('message-deleted', { chatId: String(chatId), logId: String(logId) });
         return sendJson(res, 200, r);
       } catch (e) {
-        return sendToolError(res, e);
+        return sendToolError(res, e, requestId);
       }
     }
     if (p === '/api/forward' && req.method === 'POST') {
-      const { chatId, text, type, extra } = await readBody(req);
+      const { chatId, text, type, extra, requestId } = await readBody(req);
       if (!chatId || !text) return sendJson(res, 400, { error: 'chatId and text required' });
-      if (!bridge.isConnected) return sendJson(res, 503, { error: 'not connected' });
+      if (!isRequestId(requestId)) return sendJson(res, 400, MISSING_REQUEST_ID);
+      if (!bridge.isConnected) return sendJson(res, 503, NOT_CONNECTED);
       try {
-        const r = await bridge.forwardMessage(String(chatId), { text: String(text), type: type ? Number(type) : 1, extra: extra ? String(extra) : undefined });
+        const r = await bridge.forwardMessage(requestId, String(chatId), { text: String(text), type: type ? Number(type) : 1, extra: extra ? String(extra) : undefined });
         return sendJson(res, 200, r);
       } catch (e) {
-        return sendToolError(res, e);
+        return sendToolError(res, e, requestId);
       }
     }
     if (p === '/api/self-delete' && req.method === 'POST') {
@@ -457,18 +462,19 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (p === '/api/leave' && req.method === 'POST') {
-      const { chatId, silence, block } = await readBody(req);
+      const { chatId, silence, block, requestId } = await readBody(req);
       if (!chatId) return sendJson(res, 400, { error: 'chatId required' });
-      if (!bridge.isConnected) return sendJson(res, 503, { error: 'not connected' });
+      if (!isRequestId(requestId)) return sendJson(res, 400, MISSING_REQUEST_ID);
+      if (!bridge.isConnected) return sendJson(res, 503, NOT_CONNECTED);
       try {
-        const r = await bridge.leaveChat(String(chatId), { silence: silence === true, block: block === true });
+        const r = await bridge.leaveChat(requestId, String(chatId), { silence: silence === true, block: block === true });
         if (r.status === 0) {
           chats.delete(String(chatId));
           broadcast('chat-left', { chatId: String(chatId) });
         }
         return sendJson(res, 200, r);
       } catch (e) {
-        return sendToolError(res, e);
+        return sendToolError(res, e, requestId);
       }
     }
     if (p === '/api/search') {

@@ -109,18 +109,21 @@ test('every GUI read reaches an existing daemon tool with valid arguments', asyn
   assert.deepEqual((await bridge.selfDeleteMessages(OPEN, ['4001'])).hidden, ['4001']);
 });
 
-test('every GUI write sends its own fresh requestId to an existing daemon tool', async t => {
+test('every GUI write passes the page\'s requestId through unchanged, and a retry reuses it', async t => {
   const { bridge, calls } = await daemon(t);
-  const sent = await bridge.sendMessage(OPEN, 'fixture text', { reply: { logId: '4001', userId: FRIEND, text: 'fixture hello' } });
+  const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+  const reply = { logId: '4001', userId: FRIEND, text: 'fixture hello' };
+  const sent = await bridge.sendMessage(id(1), OPEN, 'fixture text', { reply });
   assert.equal(sent.status, 0); assert.equal(sent.logId, '5001');
-  assert.equal((await bridge.deleteMessage(OPEN, '4001')).status, 0);
-  assert.equal((await bridge.forwardMessage(OPEN, { text: 'fixture text' })).status, 0);
-  assert.equal((await bridge.markRead(OPEN, '4001')).status, 0);
-  assert.equal((await bridge.leaveChat(OPEN, { silence: true })).status, 0);
+  assert.equal((await bridge.deleteMessage(id(2), OPEN, '4001')).status, 0);
+  assert.equal((await bridge.forwardMessage(id(3), OPEN, { text: 'fixture text' })).status, 0);
+  assert.equal((await bridge.markRead(id(4), OPEN, '4001')).status, 0);
+  assert.equal((await bridge.leaveChat(id(5), OPEN, { silence: true })).status, 0);
+  // The same message tried again after an unknown outcome: the daemon sees the same request, not a new one.
+  await bridge.sendMessage(id(1), OPEN, 'fixture text', { reply });
   const ids = calls.filter(c => c.op.endsWith('.prepare') || c.op.startsWith('prepare:'))
     .map(c => Array.isArray(c.args) ? c.args.find(a => typeof a === 'string' && UUID.test(a)) : (c.args as { requestId: string }).requestId);
-  assert.equal(ids.length, 5); assert.ok(ids.every(id => UUID.test(id)), 'each write carries a UUID requestId');
-  assert.equal(new Set(ids).size, 5, 'a new requestId per action');
+  assert.deepEqual(ids, [id(1), id(2), id(3), id(4), id(5), id(1)]);
   assert.deepEqual(calls.filter(c => c.op.startsWith('prepare:')).map(c => c.op), ['prepare:mark_read', 'prepare:leave_chat']);
 });
 

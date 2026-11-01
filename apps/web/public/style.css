@@ -1494,3 +1494,11 @@ body[data-theme="dark"] .bubble-quoted-reply {
   width: 90px; padding: 6px 8px; border: 1px solid var(--side-border); border-radius: 7px;
   background: var(--card-bg); color: var(--ink); font-size: 13px; text-align: center; letter-spacing: 2px;
 }
+
+/* A send whose outcome is unknown: it may have gone out, so it stays visible until checked. */
+.msg-row.uncertain { flex-wrap: wrap; }
+.msg-row.uncertain .bubble { opacity: 0.7; outline: 1px dashed #f59e0b; }
+.send-uncertain { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; font-size: 11px; color: #b45309; margin-top: 4px; }
+body[data-theme="dark"] .send-uncertain { color: #fbbf24; }
+.send-uncertain button { font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; }
+.send-uncertain button:disabled { opacity: 0.5; cursor: default; }

@@ -1,16 +1,32 @@
 import net from 'node:net';
 import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
 
 /** A kakao-max tool error; APPROVAL_REQUIRED carries the passkey page link when the daemon has one. */
 export class McpToolError extends Error {
   readonly code?: string;
   readonly approvalUrl?: string;
-  constructor(message: string, code?: string, approvalUrl?: string) {
+  readonly retryable: boolean;
+  constructor(message: string, code?: string, approvalUrl?: string, retryable = false) {
     super(message);
     this.code = code;
     this.approvalUrl = approvalUrl;
+    this.retryable = retryable;
+  }
+}
+
+/**
+ * The bridge itself failed, not the daemon's tool. `uncertain` is true once the request may have
+ * reached the daemon (connection lost mid-call, timeout, protocol error): the action may have happened.
+ */
+export type McpTransportCode = 'DAEMON_NOT_CONNECTED' | 'CONNECTION_LOST' | 'TIMEOUT' | 'RPC_ERROR';
+export class McpTransportError extends Error {
+  readonly code: McpTransportCode;
+  readonly uncertain: boolean;
+  constructor(code: McpTransportCode, message: string) {
+    super(message);
+    this.code = code;
+    this.uncertain = code !== 'DAEMON_NOT_CONNECTED';
   }
 }
 
@@ -53,6 +69,8 @@ export interface McpBridgeOptions {
   reconnectDelayMs?: number;
   /** How long the MCP `initialize` handshake may take before the socket is dropped (default 10000). */
   initTimeoutMs?: number;
+  /** How long one tool call may take, including a confirmation dialog the person answers (default 150000). */
+  callTimeoutMs?: number;
 }
 
 export interface ChatMetaResponse {
@@ -77,6 +95,7 @@ export class McpBridge extends EventEmitter {
 
   private readonly reconnectDelayMs: number;
   private readonly initTimeoutMs: number;
+  private readonly callTimeoutMs: number;
   private reconnectTimer?: NodeJS.Timeout;
   /** The in-flight connect, shared by concurrent callers. */
   private connecting?: Promise<void>;
@@ -89,6 +108,7 @@ export class McpBridge extends EventEmitter {
     this.port = opts.port || 8787;
     this.reconnectDelayMs = opts.reconnectDelayMs ?? 3000;
     this.initTimeoutMs = opts.initTimeoutMs ?? 10000;
+    this.callTimeoutMs = opts.callTimeoutMs ?? 150000;
   }
 
   get isConnected(): boolean {
@@ -175,7 +195,7 @@ export class McpBridge extends EventEmitter {
     for (const id of this.dialogs.keys()) this.emit('approval-closed', id);
     this.dialogs.clear();
     for (const [, { reject }] of this.pending) {
-      reject(new Error('MCP socket disconnected'));
+      reject(new McpTransportError('CONNECTION_LOST', 'Daemon connection disconnected before it answered; the action may or may not have happened'));
     }
     this.pending.clear();
     this.rl?.close();
@@ -215,7 +235,7 @@ export class McpBridge extends EventEmitter {
         const { resolve, reject } = this.pending.get(msg.id)!;
         this.pending.delete(msg.id);
         if (msg.error) {
-          reject(new Error(msg.error.message || 'JSON-RPC error'));
+          reject(new McpTransportError('RPC_ERROR', msg.error.message || 'JSON-RPC error'));
         } else {
           resolve(msg.result);
         }
@@ -258,23 +278,30 @@ export class McpBridge extends EventEmitter {
     return true;
   }
 
-  private call(method: string, params: Record<string, any> = {}): Promise<any> {
+  private call(method: string, params: Record<string, any> = {}, timeoutMs?: number): Promise<any> {
     return new Promise((resolve, reject) => {
       if (!this.socket || this.socket.destroyed) {
-        return reject(new Error('MCP socket not connected'));
+        return reject(new McpTransportError('DAEMON_NOT_CONNECTED', 'Not connected to the daemon; nothing was sent'));
       }
       const id = ++this.reqId;
-      this.pending.set(id, { resolve, reject });
+      // A late answer after the timeout is dropped: the caller already reported the outcome as unknown.
+      const timer = timeoutMs ? setTimeout(() => {
+        if (this.pending.delete(id)) reject(new McpTransportError('TIMEOUT', `The daemon did not answer within ${Math.round(timeoutMs / 1000)}s; the action may or may not have happened`));
+      }, timeoutMs) : undefined;
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); }
+      });
       const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
       this.socket.write(payload);
     });
   }
 
   async callTool<T = any>(name: string, args: Record<string, any> = {}): Promise<T> {
-    const res = await this.call('tools/call', { name, arguments: args });
+    const res = await this.call('tools/call', { name, arguments: args }, this.callTimeoutMs);
     if (res.isError) {
       const error = res.structuredContent?.error;
-      throw new McpToolError(res.content?.[0]?.text || 'Tool call failed', error?.code, error?.details?.passkey?.approvalUrl);
+      throw new McpToolError(res.content?.[0]?.text || 'Tool call failed', error?.code, error?.details?.passkey?.approvalUrl, error?.retryable === true);
     }
     const text = res.content?.[0]?.text;
     if (text) {
@@ -303,7 +330,12 @@ export class McpBridge extends EventEmitter {
     return this.callTool('read_messages', { chatId, mode: 'history', limit, ...(max ? { beforeLogId: max } : {}) });
   }
 
+  /**
+   * Writes take the caller's requestId: the browser keeps one per draft or action and reuses it after an
+   * uncertain outcome, so the daemon replays the same operation instead of performing it twice.
+   */
   async sendMessage(
+    requestId: string,
     chatId: string,
     text: string,
     opts: {
@@ -312,7 +344,7 @@ export class McpBridge extends EventEmitter {
     } = {}
   ): Promise<{ status: number; logId?: string; messageId?: string }> {
     return this.callTool('send_message', {
-      requestId: randomUUID(),
+      requestId,
       chatId,
       text,
       ...(opts.reply ? { replyToLogId: opts.reply.logId, replyToUserId: opts.reply.userId, replyToText: opts.reply.text } : {}),
@@ -320,8 +352,8 @@ export class McpBridge extends EventEmitter {
     });
   }
 
-  async deleteMessage(chatId: string, logId: string): Promise<{ status: number }> {
-    return this.callTool('edit_or_delete_message', { requestId: randomUUID(), action: 'delete', chatId, logId });
+  async deleteMessage(requestId: string, chatId: string, logId: string): Promise<{ status: number }> {
+    return this.callTool('edit_or_delete_message', { requestId, action: 'delete', chatId, logId });
   }
 
   async selfDeleteMessages(chatId: string, logIds: string[]): Promise<{ local: true; hidden: string[]; alreadyHidden: string[]; notStored: string[] }> {
@@ -329,18 +361,19 @@ export class McpBridge extends EventEmitter {
   }
 
   async forwardMessage(
+    requestId: string,
     chatId: string,
     opts: { text: string; type?: number; extra?: string }
   ): Promise<{ status: number; logId?: string }> {
-    return this.callTool('forward_message', { requestId: randomUUID(), chatId, text: opts.text, type: opts.type ?? 1, ...(opts.extra ? { extra: opts.extra } : {}) });
+    return this.callTool('forward_message', { requestId, chatId, text: opts.text, type: opts.type ?? 1, ...(opts.extra ? { extra: opts.extra } : {}) });
   }
 
-  async leaveChat(chatId: string, opts: { silence?: boolean; block?: boolean } = {}): Promise<{ status: number }> {
-    return this.callTool('leave_chat', { requestId: randomUUID(), chatId, silence: opts.silence === true, block: opts.block === true });
+  async leaveChat(requestId: string, chatId: string, opts: { silence?: boolean; block?: boolean } = {}): Promise<{ status: number }> {
+    return this.callTool('leave_chat', { requestId, chatId, silence: opts.silence === true, block: opts.block === true });
   }
 
-  async markRead(chatId: string, watermark: string): Promise<{ status: number }> {
-    return this.callTool('mark_read', { requestId: randomUUID(), chatId, watermark });
+  async markRead(requestId: string, chatId: string, watermark: string): Promise<{ status: number }> {
+    return this.callTool('mark_read', { requestId, chatId, watermark });
   }
 
   /** kakao-max searches one room at a time (read_messages search mode). */

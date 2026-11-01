@@ -58,3 +58,42 @@ test('CLI smoke diagnostics omit account, room, friend and message data on succe
   }
   assert.ok(calls.every(name => ['get_status', 'list_chats', 'list_friends', 'read_messages'].includes(name)));
 });
+
+test('CLI smoke checks a deny room without ever asking the person to approve a read', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-deny-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sockets = new Set<net.Socket>(), reads: Array<Record<string, unknown>> = [];
+  const chat = { id: '987654321', type: 'DirectChat', unreadCount: 0, lastSendAt: 1 };
+  const error = (code: string) => ({ isError: true, content: [{ type: 'text', text: code }], structuredContent: { error: { code, message: code } } });
+  const server = net.createServer(socket => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket));
+    readline.createInterface({ input: socket }).on('error', () => {}).on('line', line => {
+      const req = JSON.parse(line);
+      let result: unknown = { protocolVersion: '2025-06-18' };
+      if (req.method === 'tools/call') {
+        const { name, arguments: args } = req.params;
+        let data: unknown;
+        if (name === 'get_status') data = { connected: true, userId: '123456789' };
+        else if (name === 'list_chats') data = args.chatId ? { access: { rule: { mode: 'deny' } } } : { chats: [chat] };
+        else if (name === 'list_friends') data = { count: 1, friends: [{ userId: '111111111', nickName: 'fixture-friend' }] };
+        else if (name === 'read_messages') reads.push(args);
+        else throw new Error('Unexpected smoke tool');
+        // Like the daemon: a deny-room read without a grant asks the person; an unknown grant is refused.
+        result = name === 'read_messages' ? error(typeof args.readGrantId === 'string' ? 'POLICY_DENIED' : 'APPROVAL_REQUIRED')
+          : { content: [{ type: 'text', text: JSON.stringify(data) }] };
+      }
+      socket.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }) + '\n');
+    });
+  });
+  t.after(() => { for (const socket of sockets) socket.destroy(); server.close(); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('KAKAO_')));
+  env.MCP_HOST = '127.0.0.1'; env.MCP_PORT = String((server.address() as net.AddressInfo).port);
+  const result = await new Promise<{ code: number; output: string }>(resolve => {
+    execFile(process.execPath, ['--experimental-strip-types', fileURLToPath(new URL('./index.ts', import.meta.url)), 'test'],
+      { cwd: root, env, timeout: 15000 }, (error, stdout, stderr) => resolve({ code: error ? Number(error.code) : 0, output: stdout + stderr }));
+  });
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(reads.map(r => r.mode ?? 'history'), ['history', 'search']);
+  assert.ok(reads.every(r => typeof r.readGrantId === 'string' && r.requestId === undefined), 'every deny probe carries a grant and never a requestId');
+});

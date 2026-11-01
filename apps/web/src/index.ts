@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { McpBridge, type McpToolError } from './mcp-bridge.ts';
 import { ApprovalRelay } from './approval-relay.ts';
 import { isRequestId, writeFailure, MISSING_REQUEST_ID, NOT_CONNECTED } from './write-request.ts';
+import { controlRoute } from './control-panel.ts';
 import { fetchOg, type OgPreview } from './og.ts';
 // Only the program-location helper: the GUI never loads the account core.
 import { packagedEntry } from '../../../packages/core/src/entry.ts';
@@ -329,6 +330,15 @@ const server = http.createServer(async (req, res) => {
     return res.end('kakao-max web: open the launch link printed in the terminal that started the GUI.\n');
   }
   try {
+    if (p === '/api/control' || p.startsWith('/api/control/')) {
+      const method = req.method || 'GET';
+      const r = await controlRoute(p, method, method === 'POST' ? await readBody(req) : undefined, bridge, () => approvals.list());
+      if (r) {
+        // Other open pages refresh their panel; the event carries no data.
+        if (method === 'POST' && r.status === 200) broadcast('control-changed', {});
+        return sendJson(res, r.status, r.body);
+      }
+    }
     if (p === '/api/approvals' && req.method === 'GET') {
       return sendJson(res, 200, { approvals: approvals.list() });
     }

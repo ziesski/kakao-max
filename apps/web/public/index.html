@@ -152,6 +152,40 @@
               <span class="status-pill green" id="settingsStatusPill">정상 연결됨</span>
             </div>
           </div>
+          <div class="settings-group" id="controlPanel">
+            <h3>에이전트 제어</h3>
+            <div class="settings-item">
+              <span>데몬·계정 연결</span>
+              <span class="status-pill" id="ctlConn">—</span>
+            </div>
+            <div class="settings-item">
+              <span>에이전트 모드 <small>운영자 설정 · 여기서 바꿀 수 없음</small></span>
+              <strong id="ctlMode">—</strong>
+            </div>
+            <div class="settings-item">
+              <span>전송·변경 일시정지</span>
+              <div class="settings-inline">
+                <span class="status-pill" id="ctlPaused">—</span>
+                <button type="button" class="mini-btn" id="ctlPause" title="에이전트의 전송과 계정 변경을 즉시 멈춥니다">일시정지</button>
+                <button type="button" class="mini-btn hidden" id="ctlResume" title="해제는 확인 코드로 승인해야 합니다">해제 요청</button>
+              </div>
+            </div>
+            <div class="settings-item">
+              <span>대기 중인 승인</span>
+              <div class="settings-inline">
+                <strong id="ctlApprovals">0건</strong>
+                <button type="button" class="mini-btn hidden" id="ctlApprovalsOpen">승인 창 열기</button>
+              </div>
+            </div>
+            <div class="settings-row settings-row-col">
+              <span>허용한 권한 <small>철회는 즉시 적용 · 다시 허용하려면 승인 필요</small></span>
+              <ul class="perm-list" id="ctlPermissions"></ul>
+            </div>
+            <div class="settings-row">
+              <small class="ctl-note" id="ctlNote"></small>
+              <button type="button" class="mini-btn" id="ctlRefresh">새로고침</button>
+            </div>
+          </div>
           <div class="settings-group">
             <h3>알림 및 소리</h3>
             <label class="settings-row">

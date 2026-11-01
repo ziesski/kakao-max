@@ -340,6 +340,7 @@ function switchTab(tabName) {
   if (tabName === 'friends') {
     renderFriends();
   }
+  if (tabName === 'settings') void loadControlPanel();
 }
 
 function setConn(connected, err) {
@@ -824,6 +825,12 @@ function clearUnreadUpTo(targetLogId, sendAt) {
     }
   });
 }
+
+// Rendering state for date dividers and author grouping. Declared here so the first message
+// appended before any history loaded (e.g. a closed room) does not throw.
+let lastRenderedDate = null;
+let lastRenderedAuthor = null;
+let lastRenderedTimestamp = 0;
 
 function renderMessages(msgs) {
   const box = $('messages');
@@ -1769,12 +1776,14 @@ function showNextApproval() {
 function addApproval(d) {
   if (!d || typeof d.id !== 'string' || approvalQueue.some((x) => x.id === d.id)) return;
   approvalQueue.push(d);
+  updateApprovalCount();
   if (approvalQueue.length === 1) showNextApproval(); else $('approvalQueue').textContent = `대기 ${approvalQueue.length}건`;
 }
 
 function removeApproval(id) {
   const wasFirst = approvalQueue[0]?.id === id;
   approvalQueue = approvalQueue.filter((x) => x.id !== id);
+  updateApprovalCount();
   if (wasFirst) showNextApproval(); else if (approvalQueue.length) $('approvalQueue').textContent = approvalQueue.length > 1 ? `대기 ${approvalQueue.length}건` : '';
 }
 
@@ -1800,6 +1809,129 @@ async function answerApproval(action) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// Control panel (설정 탭 · 에이전트 제어): status, pause, permissions, pending approvals.
+// Display and narrowing only: the agent mode is not changeable here, and releasing a
+// pause goes through the daemon's own approval dialog with a code the person types.
+// ----------------------------------------------------------------------------
+const MODE_LABEL = { ask: '묻기 (ask)', trust: '신뢰 (trust)' };
+const PERM_KIND = { send: '전송', 'read-rule': '읽기', 'read-grant': '읽기 1회' };
+
+function controlNote(text) {
+  $('ctlNote').textContent = text || '';
+}
+
+function updateApprovalCount() {
+  const n = approvalQueue.length;
+  $('ctlApprovals').textContent = `${n}건`;
+  $('ctlApprovalsOpen').classList.toggle('hidden', n === 0);
+}
+
+function roomLabel(chatId) {
+  const c = chats.find((x) => x.id === chatId);
+  return c ? titleOf(c) : `방 …${String(chatId).slice(-6)}`;
+}
+
+async function loadControlPanel() {
+  let r;
+  try {
+    r = await api('/api/control');
+  } catch (e) {
+    controlNote(`불러오지 못했습니다: ${e.message}`);
+    return;
+  }
+  const s = r.status || {};
+  const conn = $('ctlConn');
+  const ok = s.connected && s.accountConnected !== false;
+  conn.textContent = !s.connected ? '데몬 연결 끊김' : s.accountConnected === false ? '계정 재연결 중' : '정상';
+  conn.className = 'status-pill ' + (ok ? 'green' : '');
+  $('ctlMode').textContent = s.agentMode ? MODE_LABEL[s.agentMode.mode] || s.agentMode.mode : '—';
+  $('ctlMode').title = '운영자가 설정 파일 또는 npm run setup -- --mode로 정합니다.';
+  const paused = s.paused;
+  $('ctlPaused').textContent = paused == null ? '—' : paused ? '일시정지됨' : '동작 중';
+  $('ctlPaused').className = 'status-pill ' + (paused === false ? 'green' : '');
+  $('ctlPause').classList.toggle('hidden', paused !== false);
+  $('ctlResume').classList.toggle('hidden', paused !== true);
+  for (const id of ['ctlPause', 'ctlResume']) $(id).disabled = !s.connected;
+  renderPermissions(r.permissions || []);
+  (r.approvals || []).forEach(addApproval);
+  updateApprovalCount();
+}
+
+function renderPermissions(items) {
+  const list = $('ctlPermissions');
+  list.innerHTML = '';
+  if (!items.length) {
+    const li = document.createElement('li');
+    li.className = 'perm-empty';
+    li.textContent = '허용한 권한이 없습니다.';
+    list.appendChild(li);
+    return;
+  }
+  for (const p of items) {
+    const li = document.createElement('li');
+    li.className = 'perm-item';
+    const kind = document.createElement('span');
+    kind.className = 'perm-kind';
+    kind.textContent = PERM_KIND[p.kind] || p.kind;
+    const body = document.createElement('span');
+    body.className = 'perm-body';
+    // Room titles are untrusted text: textContent only.
+    const room = document.createElement('strong');
+    room.textContent = roomLabel(p.chatId);
+    const detail = document.createElement('small');
+    detail.textContent = p.detail;
+    body.append(room, detail);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mini-btn';
+    btn.textContent = '철회';
+    btn.addEventListener('click', () => void revokePermission(p, btn));
+    li.append(kind, body, btn);
+    list.appendChild(li);
+  }
+}
+
+async function revokePermission(p, btn) {
+  if (!confirm(`'${roomLabel(p.chatId)}'의 ${PERM_KIND[p.kind] || ''} 권한을 철회할까요?\n즉시 적용되며, 다시 허용하려면 승인이 필요합니다.`)) return;
+  btn.disabled = true;
+  try {
+    const r = await api('/api/control/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ permissionId: p.permissionId }) });
+    controlNote(r.revoked ? '철회했습니다.' : '이미 철회된 권한입니다.');
+  } catch (e) {
+    controlNote(`철회 실패: ${e.message}`);
+  }
+  await loadControlPanel();
+}
+
+async function pauseAgent() {
+  $('ctlPause').disabled = true;
+  try {
+    await api('/api/control/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: true }) });
+    controlNote('일시정지했습니다. 에이전트의 전송과 계정 변경이 멈춥니다.');
+  } catch (e) {
+    controlNote(`일시정지 실패: ${e.message}`);
+  }
+  await loadControlPanel();
+}
+
+async function resumeAgent() {
+  $('ctlResume').disabled = true;
+  controlNote('해제 승인을 요청했습니다. 승인 창에 표시된 확인 코드를 직접 입력하세요.');
+  const { result, error, outcome } = await postWrite('/api/control/resume', 'resume', {});
+  if (outcome === 'done') controlNote(result?.paused === false ? '일시정지를 해제했습니다.' : '아직 일시정지 상태입니다.');
+  else if (outcome === 'uncertain') controlNote(`해제 결과 불명 (${error.code || '알 수 없음'}). 새로고침으로 상태를 확인하세요. 다시 요청하면 같은 요청으로 확인합니다.`);
+  else controlNote(error.code === 'POLICY_DENIED' ? '해제를 거절했습니다. 일시정지 상태가 유지됩니다.' : `해제되지 않았습니다: ${error.message}`);
+  await loadControlPanel();
+}
+
+function initControlPanel() {
+  $('ctlPause').addEventListener('click', () => void pauseAgent());
+  $('ctlResume').addEventListener('click', () => void resumeAgent());
+  $('ctlRefresh').addEventListener('click', () => void loadControlPanel());
+  $('ctlApprovalsOpen').addEventListener('click', () => showNextApproval());
+}
+
 function initApprovals() {
   $('approvalForm').addEventListener('submit', (e) => { e.preventDefault(); void answerApproval('accept'); });
   $('approvalDecline').addEventListener('click', () => void answerApproval('decline'));
@@ -1817,6 +1949,7 @@ function connectSSE() {
   es.addEventListener('status', (ev) => {
     const d = JSON.parse(ev.data);
     setConn(d.connected, d.error);
+    if (activeTab === 'settings') void loadControlPanel();
     if (d.chats && d.chats.length > 0) {
       chats = d.chats;
       sortChats();
@@ -1827,6 +1960,9 @@ function connectSSE() {
 
   es.addEventListener('approval-request', (ev) => addApproval(JSON.parse(ev.data)));
   es.addEventListener('approval-closed', (ev) => removeApproval(JSON.parse(ev.data).id));
+  es.addEventListener('control-changed', () => {
+    if (activeTab === 'settings') void loadControlPanel();
+  });
 
   es.addEventListener('chat-meta', (ev) => {
     const d = JSON.parse(ev.data);
@@ -2275,6 +2411,7 @@ async function init() {
 
   initMessagesScroll();
   initApprovals();
+  initControlPanel();
   connectSSE();
 }
 

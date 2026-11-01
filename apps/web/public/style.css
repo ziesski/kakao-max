@@ -1502,3 +1502,14 @@ body[data-theme="dark"] .bubble-quoted-reply {
 body[data-theme="dark"] .send-uncertain { color: #fbbf24; }
 .send-uncertain button { font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; }
 .send-uncertain button:disabled { opacity: 0.5; cursor: default; }
+
+/* Control panel (설정 · 에이전트 제어) */
+.perm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.perm-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--side-border); border-radius: 8px; }
+.perm-kind { font-size: 11px; font-weight: 600; color: var(--muted); min-width: 44px; }
+.perm-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.perm-body strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perm-body small { color: var(--muted); font-size: 11px; }
+.perm-empty { color: var(--muted); font-size: 12px; }
+.ctl-note { color: var(--muted); font-size: 12px; flex: 1; margin-right: 8px; }
+.mini-btn:disabled { opacity: 0.5; cursor: default; }

@@ -97,6 +97,16 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
         : 'This installation was set up from the kakao-max package; update it with kakao-max setup --update. Nothing was stopped');
     }
     const validPin = pkg ? RELEASE_VERSION.test(state.release) && RELEASE_DIGEST.test(state.digest) : /^[a-f0-9]{40}$/.test(state.commit);
+    // An update records the pin it is installing before it touches the app; the marker stays while the result is unconfirmed.
+    const pending: string | undefined = typeof state.pendingUpdate === 'string' && (pkg ? RELEASE_DIGEST : /^[a-f0-9]{40}$/).test(state.pendingUpdate) ? state.pendingUpdate : undefined;
+    if (state.pendingUpdate !== undefined && !pending) throw new KakaoError('CONFIG_INVALID', 'Invalid pending update in the install manifest; nothing was stopped');
+    const base = { ...state }; delete base.pendingUpdate;
+    // The commands that actually resume a stopped managed install, named in every message that leaves it stopped.
+    const recoverCommand = pkg ? 'kakao-max setup --repair'
+      : `sudo node --experimental-strip-types apps/mcp/src/update-managed.ts --via-deploy ${h.target} "<reason>" --recover (from the clean published checkout)`;
+    const repairCommand = pkg ? 'kakao-max setup --repair' : 'npm run setup -- --repair';
+    const pinLabel = (release: string | undefined, pin: string) => pkg && release ? releaseLabel(release, pin) : pin.slice(0, 12);
+    if (pending && !h.recover) throw new KakaoError('CONFIG_INVALID', `A previous update did not finish and the service may be stopped. Run: ${recoverCommand}. Nothing was stopped`);
     if (![1, 2].includes(state.version) || (state.phase !== 'running' && !(h.recover && state.phase === 'configured')) || !validPin || state.deviceUuid !== undefined) throw new KakaoError('CONFIG_INVALID', 'Managed update requires running state, or explicit recovery of a configured installation');
     const uid = Number(h.run('id', ['-u', activeService]).trim()), gid = Number(h.run('id', ['-g', activeService]).trim());
     if (!Number.isSafeInteger(uid) || uid <= 0 || !Number.isSafeInteger(gid) || gid < 0) throw new KakaoError('CONFIG_INVALID', 'Invalid service identity');
@@ -135,10 +145,14 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
     const stripMovedPaths = (txt: string) => txt.split('\n').filter(l => !MOVED_KEYS.some(k => l.startsWith(`${k}=`))).join('\n');
 
     const git = (repo: string, ...args: string[]) => h.run('git', ['--no-optional-locks', '-c', `safe.directory=${h.repo}`, '-C', repo, ...args]).trim();
+    const digestOf = (dir: string) => { try { return releaseDigest(dir); } catch { return ''; } };
+    const rollbackDir = path.join(activeRoot, 'rollback');
+    // After a failed update the app may hold the attempted pin (or, for a package, a partial copy); only explicit recovery accepts that.
+    const resumable = !!(h.recover && pending);
     if (pkg) {
-      if (releaseDigest(app) !== state.digest) throw new KakaoError('CONFIG_INVALID', 'Installed files differ from the recorded release; nothing was stopped');
+      if (digestOf(app) !== state.digest && !resumable) throw new KakaoError('CONFIG_INVALID', 'Installed files differ from the recorded release; nothing was stopped');
     } else if (git(h.repo, 'rev-parse', 'HEAD') !== h.target || git(h.repo, 'rev-parse', 'origin/main') !== h.target || git(h.repo, 'status', '--porcelain') ||
-        git(app, 'rev-parse', 'HEAD') !== state.commit || git(app, 'status', '--porcelain') || git(h.repo, 'merge-base', state.commit, h.target) !== state.commit) {
+        ![state.commit, ...(resumable ? [pending] : [])].includes(git(app, 'rev-parse', 'HEAD')) || git(app, 'status', '--porcelain') || git(h.repo, 'merge-base', state.commit, h.target) !== state.commit) {
       throw new KakaoError('CONFIG_INVALID', 'Update requires clean published main and its managed ancestor');
     }
     const current = pkg ? state.release === pkg.version && state.digest === pkg.digest : state.commit === h.target;
@@ -156,8 +170,10 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
         }
         saved = changed;
       }
-      if (!saved.KAKAO_EMAIL || !saved.KAKAO_PASSWORD || saved.KAKAO_ENABLE_TOKEN_REFRESH !== '1' ||
-          !/^[1-3]$/.test(saved.KAKAO_AUTH_RELOGIN_MAX_ATTEMPTS ?? '3')) {
+      // A failed update stopped a daemon that had just passed its health check, so its saved session is what restarts it;
+      // other recoveries may need a bounded re-login. Neither path forces a login.
+      if (!pending && (!saved.KAKAO_EMAIL || !saved.KAKAO_PASSWORD || saved.KAKAO_ENABLE_TOKEN_REFRESH !== '1' ||
+          !/^[1-3]$/.test(saved.KAKAO_AUTH_RELOGIN_MAX_ATTEMPTS ?? '3'))) {
         throw new KakaoError('CONFIG_INVALID', 'Recovery requires saved login data and explicitly enabled bounded re-login');
       }
     } else {
@@ -168,6 +184,21 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
     const beforeEnvText = fs.readFileSync(env, 'utf8');
     const beforeEnvWithoutMoved = stripMovedPaths(beforeEnvText);
     const beforeDigest = digest();
+
+    // Keep what is needed to put the pinned version back if the new one cannot be installed or built.
+    // A package keeps a verified copy of its release files, taken while the daemon still runs.
+    let rollbackReady = false;
+    if (pkg) {
+      if (digestOf(app) === state.digest) {
+        fs.rmSync(rollbackDir, { recursive: true, force: true });
+        fs.mkdirSync(rollbackDir, { mode: 0o700 });
+        installRelease({ dir: app, version: state.release, digest: state.digest }, rollbackDir);
+        rollbackReady = true;
+      } else if (fs.existsSync(rollbackDir)) {
+        protectedPath(rollbackDir, true);
+        rollbackReady = digestOf(rollbackDir) === state.digest;
+      }
+    }
 
     if (!pkg) git(app, 'fetch', '--no-tags', '--depth', '1', h.repo, h.target);
     h.run('systemctl', ['stop', `${activeService}.service`]);
@@ -182,6 +213,26 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
     let finalUnit = activeUnit;
     const completedSteps: string[] = [`stop ${activeService}.service`];
     let currentStep = 'init';
+    let updateFailed = false, updateError: unknown;
+    const pendingPin = pkg ? pkg.digest : h.target;
+    const oldLabel = pinLabel(state.release, pkg ? state.digest : state.commit), newLabel = pinLabel(pkg?.version, pendingPin);
+    const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
+    // Check out and build a pinned commit as the service user; installModules=false reuses the dependencies already in place.
+    const buildSource = (commit: string, installModules: boolean) => {
+      git(app, 'checkout', '--detach', commit);
+      h.run('chown', ['-R', `${finalService}:${finalService}`, app]);
+      if (installModules) {
+        const cache = path.join(finalRoot, 'build-cache');
+        fs.rmSync(cache, { recursive: true, force: true }); fs.mkdirSync(cache, { mode: 0o700 }); fs.chownSync(cache, uid, gid);
+        h.run('runuser', ['-u', finalService, '--', h.node, h.npm, '--cache', cache, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], false, app);
+        fs.rmSync(cache, { recursive: true });
+      }
+      h.run('runuser', ['-u', finalService, '--', h.node, path.join(app, 'node_modules/typescript/bin/tsc'), '-b', path.join(app, 'packages/protocol')], false, app);
+    };
+    const waitHealthy = async () => {
+      for (let i = 0; i < (saved.KAKAO_ENABLE_TOKEN_REFRESH === '1' ? 180 : 10); i++) { if (await h.healthy(saved.KAKAO_USER_ID, port)) return true; await h.wait(); }
+      return false;
+    };
 
     try {
       if (isMigration) {
@@ -249,19 +300,47 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
         completedSteps.push(currentStep);
       }
 
+      currentStep = `record pending update in ${stateFile}`;
+      manifest(stateFile, { ...base, phase: 'configured', pendingUpdate: pendingPin });
+      completedSteps.push(currentStep);
+
       currentStep = `build app in ${path.join(finalRoot, 'app')}`;
       if (pkg) installRelease(pkg, app);
       else {
-        git(app, 'checkout', '--detach', h.target);
-        h.run('chown', ['-R', `${finalService}:${finalService}`, app]);
-        const cache = path.join(finalRoot, 'build-cache'); fs.mkdirSync(cache, { mode: 0o700 }); fs.chownSync(cache, uid, gid);
-        h.run('runuser', ['-u', finalService, '--', h.node, h.npm, '--cache', cache, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], false, app);
-        h.run('runuser', ['-u', finalService, '--', h.node, path.join(app, 'node_modules/typescript/bin/tsc'), '-b', path.join(app, 'packages/protocol')], false, app);
-        fs.rmSync(cache, { recursive: true });
+        // A source app keeps the installed dependencies of the pinned commit aside, so putting it back needs no download.
+        const modules = path.join(app, 'node_modules');
+        if (!isMigration && git(app, 'rev-parse', 'HEAD') === state.commit && fs.existsSync(modules)) {
+          fs.rmSync(rollbackDir, { recursive: true, force: true });
+          fs.mkdirSync(rollbackDir, { mode: 0o700 });
+          fs.renameSync(modules, path.join(rollbackDir, 'node_modules'));
+        }
+        rollbackReady = !isMigration;
+        buildSource(h.target, true);
       }
       completedSteps.push(currentStep);
     } catch (err) {
-      if (isMigration) {
+      if (!isMigration && currentStep.startsWith('build app in')) {
+        // Put the pinned version back. The daemon is started again below, after ownership and integrity checks.
+        updateFailed = true; updateError = err;
+        currentStep = `restore ${oldLabel} in ${app}`;
+        try {
+          if (!rollbackReady) throw new KakaoError('STORAGE_UNSAFE', 'No verified copy of the previous release is available');
+          if (pkg) installRelease({ dir: rollbackDir, version: state.release, digest: state.digest }, app);
+          else {
+            const kept = path.join(rollbackDir, 'node_modules');
+            const modules = path.join(app, 'node_modules');
+            // Check out first: if that fails, the kept dependencies stay aside for the next recovery.
+            git(app, 'checkout', '--detach', state.commit);
+            const restored = fs.existsSync(kept);
+            if (restored) { fs.rmSync(modules, { recursive: true, force: true }); fs.renameSync(kept, modules); }
+            buildSource(state.commit, !restored);
+          }
+        } catch (restoreErr) {
+          throw new KakaoError('STORAGE_UNSAFE', `Update to ${newLabel} failed and the previous version ${oldLabel} could not be restored. ` +
+            `The service remains stopped; install-state.json records the unfinished update. Fix the cause, then run: ${recoverCommand}\n` +
+            `Update error: ${errorText(err)}\nRestore error: ${errorText(restoreErr)}`);
+        }
+      } else if (isMigration) {
         const rootMoved = fs.existsSync(h.root);
         let instructions = '';
         if (!rootMoved) {
@@ -288,10 +367,10 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
           instructions = `Root was moved to ${h.root}. Old unit is stopped. Manual recovery:\n` +
             recoverySteps.map((s, idx) => `${idx + 1}. ${s}`).join('\n');
         }
-        throw new KakaoError('STORAGE_UNSAFE', `Migration halted at "${currentStep}". Completed: [${completedSteps.join(', ')}].\n${instructions}\nError: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      throw err;
+        throw new KakaoError('STORAGE_UNSAFE', `Migration halted at "${currentStep}". Completed: [${completedSteps.join(', ')}].\n${instructions}\nError: ${errorText(err)}`);
+      } else throw err;
     } finally {
+      fs.rmSync(path.join(finalRoot, 'build-cache'), { recursive: true, force: true });
       if (fs.existsSync(app)) {
         h.run('chown', ['-R', `root:${finalService}`, app]); h.run('chmod', ['-R', 'u=rwX,g=rX,o=', app]);
       }
@@ -312,15 +391,33 @@ export async function updateManaged(h: UpdateHost): Promise<void> {
       if (digest() !== beforeDigest) throw new KakaoError('STORAGE_UNSAFE', 'Credential integrity changed; service remains stopped');
     }
 
-    if (pkg ? releaseDigest(app) !== pkg.digest : git(app, 'rev-parse', 'HEAD') !== h.target || git(app, 'status', '--porcelain')) throw new KakaoError('STORAGE_UNSAFE', 'Build integrity changed; service remains stopped');
+    if (updateFailed) {
+      // The previous pin is back on disk: verify it exactly, then start the same unit that was stopped. Only one daemon ever runs.
+      const failure = `Update to ${newLabel} failed (${errorText(updateError)})`;
+      if (digest() !== beforeDigest) throw new KakaoError('STORAGE_UNSAFE', `${failure}; credential integrity changed, so the service remains stopped`);
+      if (pkg ? digestOf(app) !== state.digest : git(app, 'rev-parse', 'HEAD') !== state.commit || git(app, 'status', '--porcelain')) {
+        throw new KakaoError('STORAGE_UNSAFE', `${failure}; the restored files differ from ${oldLabel}, so the service remains stopped. Fix the cause, then run: ${recoverCommand}`);
+      }
+      manifest(stateFile, { ...base, phase: 'configured' });
+      if (h.recover) h.run('systemctl', ['reset-failed', `${finalService}.service`]);
+      h.run('systemctl', ['start', `${finalService}.service`]);
+      if (!await waitHealthy()) {
+        throw new KakaoError('NOT_CONNECTED', `${failure}. The previous version ${oldLabel} was restored and started, but its account health is unconfirmed; no login or restart retry attempted. Check the service, then run: ${repairCommand}`);
+      }
+      manifest(stateFile, { ...base, phase: 'running' });
+      fs.rmSync(rollbackDir, { recursive: true, force: true });
+      throw new KakaoError(updateError instanceof KakaoError ? updateError.code : 'CONFIG_INVALID',
+        `${failure}. The previous version ${oldLabel} was restored and is running on the same account; credentials and data are unchanged. Fix the cause, then update again`);
+    }
+
+    if (pkg ? releaseDigest(app) !== pkg.digest : git(app, 'rev-parse', 'HEAD') !== h.target || git(app, 'status', '--porcelain')) throw new KakaoError('STORAGE_UNSAFE', `Build integrity changed; service remains stopped. Run: ${recoverCommand}`);
     const pinned = pkg ? { release: pkg.version, digest: pkg.digest } : { commit: h.target };
-    manifest(stateFile, { ...state, ...pinned, phase: 'configured' });
+    manifest(stateFile, { ...base, ...pinned, phase: 'configured' });
     if (h.recover) h.run('systemctl', ['reset-failed', `${finalService}.service`]);
     h.run('systemctl', ['start', `${finalService}.service`]);
-    let healthy = false;
-    for (let i = 0; i < (saved.KAKAO_ENABLE_TOKEN_REFRESH === '1' ? 180 : 10); i++) { if (await h.healthy(saved.KAKAO_USER_ID, port)) { healthy = true; break; } await h.wait(); }
-    if (!healthy) throw new KakaoError('NOT_CONNECTED', 'Updated account health is unconfirmed; no login or restart retry attempted');
-    manifest(stateFile, { ...state, ...pinned, phase: 'running' });
+    if (!await waitHealthy()) throw new KakaoError('NOT_CONNECTED', `Updated account health is unconfirmed; no login or restart retry attempted. Check the service, then run: ${repairCommand}`);
+    manifest(stateFile, { ...base, ...pinned, phase: 'running' });
+    fs.rmSync(path.join(finalRoot, 'rollback'), { recursive: true, force: true });
     const log = path.join(finalRoot, 'deploys.log'); if (fs.existsSync(log)) protectedPath(log, false);
     const logFd = fs.openSync(log, fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
     try {

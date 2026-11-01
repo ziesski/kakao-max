@@ -10,7 +10,7 @@ import type { McpStdioServer, McpToolGroup, ToolCallContext } from '../mcp-stdio
 import type { GrantViews } from './agent-operations.ts';
 import { prepareAndCommit, REQUEST_ID } from './one-call.ts';
 
-const READ_GRANT = { type: 'string', description: 'Manual rooms only: readGrantId from request_permission type "read". Never bypasses deny, schedule, unread or size limits.' };
+const READ_GRANT = { type: 'string', description: 'Manual rooms only: readGrantId from request_permission type "read". Never bypasses deny, schedule or size limits.' };
 
 /**
  * Received bytes go only to <dataDir>/downloads/<chatId>/, under a name the daemon makes. An agent-chosen path

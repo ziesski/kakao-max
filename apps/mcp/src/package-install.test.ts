@@ -136,3 +136,63 @@ test('a package update stops the daemon, swaps the release, keeps credentials an
   await assert.rejects(updateManaged({ ...update, release: f.host.release }), /differ from the recorded release/);
   assert.equal(active, true);
 });
+
+async function installedPackage(t: { after(fn: () => void): void }) {
+  const f = fixture(t); await bootstrapLocal(f.host);
+  const env = path.join(f.root, 'app/.env.local');
+  fs.appendFileSync(env, 'KAKAO_MCP_ALLOWED_UIDS=1000\n');
+  const commands: string[] = []; let active = true;
+  const update = { root: f.root, repo: f.host.repo, unitFile: f.host.unitFile, node: '/usr/bin/node', npm: '', target: 'release', reason: 'fixture package update',
+    release: f.host.release!, recover: false,
+    run: (program: string, args: string[]) => {
+      commands.push(`${program} ${args.join(' ')}`);
+      if (program === 'id') return String(args[0] === '-u' ? (process.getuid!() || 65000) : process.getgid!());
+      if (program === 'systemctl' && args[0] === 'is-active') return active ? 'active' : 'inactive';
+      if (program === 'systemctl' && args[0] === 'stop') active = false;
+      if (program === 'systemctl' && args[0] === 'start') active = true;
+      return '';
+    }, healthy: async () => active, wait: async () => {} };
+  // A release whose files changed after it was read fails its copy check part-way, like a broken package upgrade.
+  const broken = release(f.parent, 'release-2', '0.2.0', '// daemon 0.2.0\n');
+  fs.writeFileSync(path.join(broken.dir, 'dist/mcp.mjs'), '// changed after reading\n');
+  return { f, env, credentials: fs.readFileSync(env, 'utf8'), commands, update, broken, active: () => active, app: path.join(f.root, 'app') };
+}
+
+test('a package update whose release cannot be installed puts the previous release back and restarts it', async t => {
+  const p = await installedPackage(t);
+  const before = p.f.state();
+  await assert.rejects(updateManaged({ ...p.update, release: p.broken }), (e: any) => {
+    assert.match(e.message, /Update to 0\.2\.0 \(sha256 [a-f0-9]{12}\) failed/);
+    assert.match(e.message, /previous version 0\.1\.0 \(sha256 [a-f0-9]{12}\) was restored and is running/);
+    return true;
+  });
+  assert.equal(releaseDigest(p.app), p.f.host.release!.digest);
+  assert.deepEqual(p.f.state(), before);
+  assert.equal(p.active(), true);
+  assert.ok(p.commands.indexOf('systemctl stop kakao-max.service') < p.commands.indexOf('systemctl start kakao-max.service'));
+  assert.equal(p.commands.filter(c => c.startsWith('systemctl start')).length, 1);
+  assert.equal(fs.readFileSync(p.env, 'utf8'), p.credentials);
+  assert.equal(fs.existsSync(path.join(p.f.root, 'rollback')), false);
+});
+
+test('a package update that cannot restore its previous release records the failure and kakao-max setup --repair finishes it', async t => {
+  const p = await installedPackage(t);
+  // Lose the kept copy right after the daemon stops.
+  const run = p.update.run;
+  const update = { ...p.update, run: (program: string, args: string[]) => {
+    if (program === 'systemctl' && args[0] === 'stop') fs.rmSync(path.join(p.f.root, 'rollback'), { recursive: true, force: true });
+    return run(program, args);
+  } };
+  await assert.rejects(updateManaged({ ...update, release: p.broken }), (e: any) => e.code === 'STORAGE_UNSAFE' && /could not be restored/.test(e.message) && /kakao-max setup --repair/.test(e.message));
+  assert.equal(p.active(), false);
+  assert.equal(p.f.state().pendingUpdate, p.broken.digest);
+  assert.equal(p.f.state().release, '0.1.0');
+  await assert.rejects(updateManaged(update), /did not finish.*kakao-max setup --repair/);
+
+  const fixed = release(p.f.parent, 'release-3', '0.2.1', '// daemon 0.2.1\n');
+  await updateManaged({ ...update, release: fixed, recover: true });
+  assert.equal(p.active(), true);
+  assert.equal(releaseDigest(p.app), fixed.digest);
+  assert.deepEqual(p.f.state(), { version: 2, release: '0.2.1', digest: fixed.digest, phase: 'running', port: 8787 });
+  assert.equal(fs.readFileSync(p.env, 'utf8'), p.credentials);
+});

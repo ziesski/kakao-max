@@ -13,6 +13,8 @@ function fixture(t: { after(fn: () => void): void }) {
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const root = path.join(parent, 'managed'), repo = path.join(parent, 'source'), app = path.join(root, 'app'), data = path.join(root, 'data');
   fs.mkdirSync(app, { recursive: true }); fs.mkdirSync(data); fs.mkdirSync(repo);
+  // Dependencies of the pinned commit; a failed update must put these back without a download.
+  fs.mkdirSync(path.join(app, 'node_modules')); fs.writeFileSync(path.join(app, 'node_modules', 'marker'), 'old dependencies');
   const uid = process.getuid!() || 65000, gid = process.getgid!(), old = 'a'.repeat(40), target = 'b'.repeat(40);
   const env = path.join(app, '.env.local'), unitFile = path.join(parent, 'daemon.service');
   const credentials = `KAKAO_USER_ID=123456789\nKAKAO_ACCESS_TOKEN=fixture-token\nKAKAO_DATA_DIR=${data}\nKAKAO_MCP_LISTEN=127.0.0.1:18787\nKAKAO_MCP_ALLOWED_UIDS=1000\n`;
@@ -22,6 +24,7 @@ function fixture(t: { after(fn: () => void): void }) {
   fs.writeFileSync(stateFile, JSON.stringify({ version: 1, phase: 'running', commit: old, port: 18787 }), { mode: 0o600 });
   fs.writeFileSync(unitFile, serviceUnit(app, data, '/usr/bin/node'));
   const commands: string[] = []; let installed = old, active = true, dirty = false, healthy = true, failBuild = false, portBusy = false, stoppedFailed = false;
+  let failInstall = false, failRestore = false;
   const host = { root, repo, unitFile, node: '/usr/bin/node', npm: '/usr/bin/npm', target, reason: 'fixture update', recover: false,
     run: (program: string, args: string[]) => {
       commands.push(`${program} ${args.join(' ')}`);
@@ -31,7 +34,11 @@ function fixture(t: { after(fn: () => void): void }) {
         if (args.includes('rev-parse')) return args.includes(app) ? installed : target;
         if (args.includes('status')) return dirty ? ' M fixture' : '';
         if (args.includes('merge-base')) return old;
-        if (args.includes('checkout')) installed = target;
+        if (args.includes('checkout')) {
+          const commit = args[args.length - 1];
+          if (failRestore && commit === old) throw new Error('fixture checkout failure');
+          installed = commit;
+        }
       }
       if (program === 'systemctl') {
         if (args[0] === 'is-active') return active ? 'active' : stoppedFailed ? 'failed' : 'inactive';
@@ -39,9 +46,16 @@ function fixture(t: { after(fn: () => void): void }) {
         if (args[0] === 'start') active = true;
       }
       if (program === 'runuser' && failBuild) throw new Error('fixture build failure');
+      if (program === 'runuser' && failInstall && args.includes('ci')) {
+        // npm ci replaces node_modules before it fails.
+        fs.rmSync(path.join(app, 'node_modules'), { recursive: true, force: true }); fs.mkdirSync(path.join(app, 'node_modules'));
+        throw new Error('fixture dependency install failure');
+      }
       return '';
     }, healthy: async (expected: string) => { assert.equal(expected, '123456789'); return healthy; }, wait: async () => {} };
-  return { host, commands, credentials, env, data, stateFile, unitFile,
+  return { host, commands, credentials, env, data, stateFile, unitFile, app, root, old, target,
+    installed: () => installed, active: () => active,
+    failInstall: (on = true) => { failInstall = on; }, failRestore: (on = true) => { failRestore = on; },
     failedState: () => { stoppedFailed = true; },
     stoppedConfigured: () => { active = false; fs.writeFileSync(stateFile, JSON.stringify({ version: 1, phase: 'configured', commit: old, port: 18787 })); },
     busyPort: () => { portBusy = true; },
@@ -85,13 +99,89 @@ test('an install without KAKAO_MCP_ALLOWED_UIDS refuses before stopping, since t
   await assert.rejects(updateManaged(f.host), { code: 'CONFIG_INVALID' });
   assert.ok(!f.commands.some(c => c.startsWith('systemctl stop')));
 });
-test('a build failure leaves the daemon stopped and credentials protected without a registration or restart retry', async t => {
-  const f = fixture(t); f.failBuild();
-  await assert.rejects(updateManaged(f.host), /fixture build failure/);
-  assert.ok(f.commands.includes('systemctl stop kakao-max.service'));
-  assert.ok(!f.commands.includes('systemctl start kakao-max.service'));
+test('a failed build restores the pinned commit with its own dependencies and restarts the previous daemon once', async t => {
+  const f = fixture(t); f.failInstall();
+  const before = fs.readFileSync(f.stateFile, 'utf8');
+  await assert.rejects(updateManaged(f.host), (e: any) => {
+    assert.equal(e.code, 'CONFIG_INVALID');
+    assert.match(e.message, /Update to bbbbbbbbbbbb failed \(fixture dependency install failure\)/);
+    assert.match(e.message, /previous version aaaaaaaaaaaa was restored and is running/);
+    return true;
+  });
+  const stop = f.commands.indexOf('systemctl stop kakao-max.service');
+  const install = f.commands.findIndex(c => c.startsWith('runuser ') && c.includes(' ci '));
+  const restore = f.commands.findIndex(c => c.startsWith('git ') && c.endsWith(`checkout --detach ${f.old}`));
+  const rebuild = f.commands.findIndex((c, i) => i > restore && c.startsWith('runuser ') && c.includes('tsc'));
+  const start = f.commands.indexOf('systemctl start kakao-max.service');
+  assert.ok(stop >= 0 && install > stop && restore > install && rebuild > restore && start > rebuild);
+  assert.equal(f.commands.filter(c => c.startsWith('systemctl start')).length, 1, 'one start, no retry');
+  assert.equal(f.commands.filter(c => c.includes(' ci ')).length, 1, 'the previous dependencies come back without a download');
+  assert.equal(f.installed(), f.old); assert.equal(f.active(), true);
+  assert.equal(fs.readFileSync(path.join(f.app, 'node_modules', 'marker'), 'utf8'), 'old dependencies');
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.stateFile, 'utf8')), JSON.parse(before), 'manifest still pins the running version');
+  assert.equal(fs.existsSync(path.join(f.root, 'rollback')), false);
+  assert.equal(fs.existsSync(path.join(f.root, 'build-cache')), false);
   assert.equal(fs.readFileSync(f.env, 'utf8'), f.credentials);
   assert.equal(fs.statSync(f.env).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(`${f.root}.install-lock`), false);
+  // The restored install updates normally afterwards.
+  f.failInstall(false); await updateManaged(f.host);
+  assert.equal(JSON.parse(fs.readFileSync(f.stateFile, 'utf8')).commit, f.target);
+});
+
+test('a restored version that is not healthy stays started once and names the repair command', async t => {
+  const f = fixture(t); f.failInstall();
+  let checks = 0;
+  const host = { ...f.host, healthy: async () => checks++ === 0 };
+  await assert.rejects(updateManaged(host), (e: any) => e.code === 'NOT_CONNECTED' && /restored and started, but its account health is unconfirmed/.test(e.message) && /npm run setup -- --repair/.test(e.message));
+  assert.equal(f.commands.filter(c => c.startsWith('systemctl start')).length, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.stateFile, 'utf8')), { version: 1, phase: 'configured', commit: f.old, port: 18787 });
+});
+
+test('when the previous version cannot be restored, the manifest records the failed update and --recover accepts it without saved login', async t => {
+  const f = fixture(t); f.failInstall(); f.failRestore();
+  await assert.rejects(updateManaged(f.host), (e: any) => {
+    assert.equal(e.code, 'STORAGE_UNSAFE');
+    assert.match(e.message, /could not be restored/);
+    assert.match(e.message, /update-managed\.ts --via-deploy b{40} "<reason>" --recover/);
+    return true;
+  });
+  assert.ok(!f.commands.includes('systemctl start kakao-max.service'), 'nothing started on an unverified app');
+  assert.equal(f.installed(), f.target, 'app is left at the attempted commit');
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.stateFile, 'utf8')), { version: 1, phase: 'configured', commit: f.old, port: 18787, pendingUpdate: f.target });
+
+  // A plain update refuses before stopping anything and names the working command.
+  f.commands.length = 0;
+  await assert.rejects(updateManaged(f.host), (e: any) => /did not finish/.test(e.message) && /--recover/.test(e.message));
+  assert.ok(!f.commands.some(c => c.startsWith('systemctl stop') || c.startsWith('runuser ')));
+
+  // Explicit recovery finishes the update; this install never saved a password.
+  f.failInstall(false); f.failRestore(false); f.host.recover = true;
+  await updateManaged(f.host);
+  assert.equal(f.installed(), f.target); assert.equal(f.active(), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.stateFile, 'utf8')), { version: 1, phase: 'running', commit: f.target, port: 18787 });
+  assert.equal(fs.readFileSync(f.env, 'utf8'), f.credentials);
+});
+
+test('recovery of a failed update that fails to build again restores the previous version', async t => {
+  const f = fixture(t); f.failInstall(); f.failRestore();
+  await assert.rejects(updateManaged(f.host), { code: 'STORAGE_UNSAFE' });
+  f.failRestore(false); f.host.recover = true; f.commands.length = 0;
+  await assert.rejects(updateManaged(f.host), /previous version aaaaaaaaaaaa was restored and is running/);
+  assert.equal(f.installed(), f.old); assert.equal(f.active(), true);
+  assert.ok(f.commands.includes('systemctl reset-failed kakao-max.service'));
+  assert.equal(fs.readFileSync(path.join(f.app, 'node_modules', 'marker'), 'utf8'), 'old dependencies');
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.stateFile, 'utf8')), { version: 1, phase: 'running', commit: f.old, port: 18787 });
+});
+
+test('recovery still refuses an app at a commit that is neither pinned nor the recorded failed update', async t => {
+  const f = fixture(t); f.stoppedConfigured(); f.host.recover = true;
+  fs.writeFileSync(f.stateFile, JSON.stringify({ version: 1, phase: 'configured', commit: f.old, port: 18787, pendingUpdate: 'c'.repeat(40) }), { mode: 0o600 });
+  const host = { ...f.host, run: (program: string, args: string[]) => program === 'git' && args.includes('rev-parse') && args.includes(f.app) ? 'd'.repeat(40) : f.host.run(program, args) };
+  await assert.rejects(updateManaged(host), /managed ancestor/);
+  fs.writeFileSync(f.stateFile, JSON.stringify({ version: 1, phase: 'configured', commit: f.old, port: 18787, pendingUpdate: 'not-a-commit' }), { mode: 0o600 });
+  await assert.rejects(updateManaged(f.host), /Invalid pending update/);
+  assert.ok(!f.commands.some(c => c.startsWith('systemctl stop') || c.startsWith('systemctl start')));
 });
 
 test('explicit recovery deploys a stopped configured installation before starting the same account', async t => {
@@ -198,7 +288,7 @@ function migrationFixture(t: { after(fn: () => void): void }) {
     wait: async () => {}
   };
   return { host, commands, credentials, parent, legacyRoot, targetRoot, legacyUnitFile, targetUnitFile, legacyEnv, legacyData, stateFile, uid, gid,
-    failBuild: () => { failBuild = true; },
+    failBuild: (on = true) => { failBuild = on; },
     failGroupmod: () => { failGroupmod = true; },
     failUsermod: () => { failUsermod = true; },
     unhealthy: () => { healthy = false; },
@@ -320,6 +410,14 @@ test('migration failure at build after full migration advises recover-managed-mc
   assert.ok(f.commands.includes('systemctl stop kakaotalk-mcp.service'), 'old unit was stopped');
   assert.ok(!f.commands.includes('systemctl start kakao-max.service'), 'new unit was not started');
   assert.ok(!f.commands.includes('systemctl start kakaotalk-mcp.service'), 'old unit was not restarted (no concurrent or blind restarts)');
+
+  // The advised --recover accepts the app at the attempted commit and finishes, without a saved password.
+  const stateFile = path.join(f.targetRoot, 'install-state.json');
+  assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).pendingUpdate, f.host.target);
+  f.failBuild(false);
+  await updateManaged({ ...f.host, recover: true });
+  assert.ok(f.commands.includes('systemctl start kakao-max.service'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), { version: 1, phase: 'running', commit: f.host.target, port: 18787 });
 });
 
 test('migration failure right after disable advises sudo systemctl enable --now kakaotalk-mcp.service', async t => {

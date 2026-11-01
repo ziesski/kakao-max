@@ -94,7 +94,26 @@ credentials 저장 후 manifest에서 제거한다. 이는 대화·사용자 데
 `apps/mcp/src/update-managed.ts`가 관리형 `/var/lib/kakao-max`(또는 옛 이름 `/var/lib/kakaotalk-mcp`)의 실행 중인 설치를 갱신한다.
 clean main과 이전 commit, unit 일치, 같은 계정 연결, operator pause 부재를 확인한다. 하나라도 어긋나면 아무것도 멈추지 않는다.
 Git fetch 후 기존 daemon을 먼저 멈추고 코드를 갱신·빌드한 뒤 시작한다. 자격증명·기기 키·data/journal을 보존하며
-계정 등록·강제 로그인·백업을 하지 않는다. 빌드 실패는 서비스를 멈춘 채 보고하며 자동 rollback하지 않는다.
+계정 등록·강제 로그인·백업을 하지 않는다.
+
+갱신 실패(`npm ci`·`tsc` 실패 등) 때의 동작:
+
+1. 데몬을 멈춘 직후, 코드를 바꾸기 전에 `install-state.json`에 `phase: configured`와 시도 중인 커밋(`pendingUpdate`)을 기록한다.
+   기존 고정 커밋(`commit`)은 그대로 둔다. 기존 `node_modules`는 `/var/lib/kakao-max/rollback/`으로 옮겨 둔다.
+2. 빌드가 실패하면 기존 커밋을 다시 checkout하고 옮겨 둔 `node_modules`를 되돌린 뒤 `tsc`만 다시 실행한다(내려받기 없음).
+3. 되돌린 코드가 기존 커밋과 정확히 같고 `.env.local`이 바뀌지 않았을 때만 같은 서비스를 한 번 시작하고 같은 계정 연결을 확인한다.
+   성공하면 manifest는 갱신 전 상태(`phase: running`, 기존 커밋)로 돌아가고, 오류는 "이전 버전을 복원해 실행 중"이라고 보고한다.
+   원인을 고친 뒤 평소처럼 다시 갱신한다.
+4. 복원까지 실패하면 서비스는 멈춘 채로 두고 `pendingUpdate`가 남는다. 이때 일반 갱신은 아무것도 멈추지 않고 거부하며,
+   오류에 적힌 명령으로 복구한다: clean published checkout에서
+   `sudo node --experimental-strip-types apps/mcp/src/update-managed.ts --via-deploy <origin/main 커밋> "<이유>" --recover`.
+   `--recover`는 app이 기존 커밋이나 기록된 시도 커밋에 있는 상태를 받아들이고, 방금까지 정상이던 데몬이므로 저장된 비밀번호를
+   요구하지 않는다. 다시 빌드에 실패하면 2–3단계로 이전 버전을 복원한다. `npm run setup -- --repair`도 같은 상태를 복구한다
+   (로그인 정보 확인을 묻는다). 이름 이전(migration) 직후 빌드 실패도 같은 `--recover`로 마친다.
+5. 복원한 데몬의 계정 연결을 확인하지 못하면 재시작·로그인을 재시도하지 않고 `npm run setup -- --repair`를 안내한다.
+
+검증 범위: 주입한 호스트(가짜 `git`·`npm`·`systemctl`)와 임시 디렉터리로 단위 확인했다🟡. 실제 서버에서 실패한 갱신의 복원은 아직 확인하지 않았다❓.
+
 지금은 root가 `--via-deploy`로 직접 호출하는 저수준 도구다. 일반 사용자용 업데이트·삭제 명령은 후속이다.
 
 ### AI 연결

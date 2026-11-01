@@ -555,24 +555,30 @@ export class LocalVault {
       const tmpFileName = `.tmp_${randomUUID()}`;
       const tmpFilePath = path.join(this.tmpDir, tmpFileName);
       const outStream = fs.createWriteStream(tmpFilePath, { mode: 0o600 });
+      // Listen before the first write: a disk error (full, I/O, permissions) during the download
+      // must fail this item, not surface as an unhandled stream 'error' that ends the process.
+      let streamError: Error | undefined;
+      const streamFailed = new Promise<never>((_, reject) => {
+        outStream.once('error', (e) => { streamError = e; reject(e); });
+      });
+      streamFailed.catch(() => {}); // observed through streamError and the races below
       const hash = createHash('sha1');
       let bytesWritten = 0;
 
       const sink = async (chunk: Uint8Array) => {
+        if (streamError) throw streamError;
         bytesWritten += chunk.length;
         hash.update(chunk);
         if (!outStream.write(Buffer.from(chunk))) {
-          await new Promise<void>((r) => outStream.once('drain', r));
+          await Promise.race([new Promise<void>((r) => outStream.once('drain', r)), streamFailed]);
         }
       };
 
       let downloadOk = false;
       try {
         const res = await downloader(item.token, item.mediaType, sink);
-        await new Promise<void>((resolve, reject) => {
-          outStream.end(() => resolve());
-          outStream.on('error', reject);
-        });
+        if (streamError) throw streamError;
+        await Promise.race([new Promise<void>((resolve) => outStream.end(() => resolve())), streamFailed]);
 
         if (res.status === 0) {
           const digest = hash.digest('hex');
@@ -607,9 +613,10 @@ export class LocalVault {
           this.log?.('[vault] auto-save media download returned non-zero status');
         }
       } catch {
-        this.log?.('[vault] auto-save media download failed');
+        this.log?.(streamError ? '[vault] auto-save media write failed' : '[vault] auto-save media download failed');
       } finally {
         if (!downloadOk) {
+          outStream.destroy();
           try {
             if (fs.existsSync(tmpFilePath)) {
               fs.unlinkSync(tmpFilePath);

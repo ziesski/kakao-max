@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BSON } from 'bson';
-import { LocoSession, MediaType, ChatMetaType } from './loco-session.js';
+import net from 'node:net';
+import { once } from 'node:events';
+import { LocoSession, ResilientLocoSession, MediaType, ChatMetaType } from './loco-session.js';
+import { LocoClient } from './loco-client.js';
+import { LocoError } from '../errors/loco-error.js';
+import { encodeLocoPacket } from '../framing/loco-packet.js';
+import { createLocoV2Handshake, encryptLocoV2Frame } from '../crypto/loco-crypto.js';
 import { parseEmoticonAttachment, parseLoginList } from './loco-parse.js';
 
 /** Instantiate a session and capture the LOCO request it would send, without any socket. */
@@ -558,4 +564,109 @@ test('a connect that times out during login rejects without an unheard error eve
     session.close();
     silent.close();
   }
+});
+
+// --- Liveness and listener isolation (local loopback server; the test reads the session key in-process) ---
+
+const sessionKey = (s: LocoSession): Uint8Array => (s as any).aesKey;
+const frame = (key: Uint8Array, id: number, method: string, body: Record<string, unknown>) =>
+  Buffer.from(encryptLocoV2Frame(encodeLocoPacket(id, 0, method, body), key));
+
+/** A carriage server that answers LOGINLIST (packet 1) with status 0 and then stays silent. */
+async function silentCarriage(keyOf: () => Uint8Array | undefined) {
+  const sockets: net.Socket[] = [];
+  let closed = 0;
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    socket.on('error', () => {});
+    socket.on('close', () => { closed++; });
+    socket.once('data', () => {
+      const key = keyOf();
+      if (key) socket.write(frame(key, 1, 'LOGINLIST', { status: 0, revision: 0, chatDatas: [] }));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = (server.address() as net.AddressInfo).port;
+  return {
+    port,
+    get connections() { return sockets.length; },
+    get closed() { return closed; },
+    stop: () => { for (const s of sockets) s.destroy(); server.close(); }
+  };
+}
+
+const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
+  Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what} did not happen within ${ms}ms`)), ms).unref())]);
+
+test('a link that stops answering PING closes the session, and a later send fails with NOT_CONNECTED', async (t) => {
+  const session = new LocoSession({ pingIntervalMs: 20, requestTimeoutMs: 30, maxMissedPings: 2 });
+  const carriage = await silentCarriage(() => sessionKey(session));
+  t.after(() => { session.close(); carriage.stop(); });
+  const login = await session.connect('127.0.0.1', carriage.port, '1', 'fixture-token', 'fixture-device');
+  assert.equal(login.status, 0);
+  assert.equal(session.isClosed, false);
+
+  await within(once(session, 'close'), 1000, 'dead-link close');
+  assert.equal(session.isClosed, true);
+  await assert.rejects(session.sendText('987654321', 'hi'), (e: unknown) => e instanceof LocoError && e.code === 'NOT_CONNECTED');
+  await within(new Promise<void>((resolve) => { const tick = () => (carriage.closed > 0 ? resolve() : setTimeout(tick, 5)); tick(); }), 1000, 'socket drop');
+});
+
+test('a PING reply resets the miss count, so a live link is never dropped', async (t) => {
+  const session = new LocoSession({ pingIntervalMs: 10, requestTimeoutMs: 1000, maxMissedPings: 1 });
+  (session as any).request = async (method: string) => {
+    if (method === 'PING') return { header: { status: 0 }, data: {} };
+    throw new Error('unexpected request');
+  };
+  (session as any).socket = { destroy() { throw new Error('a live link must not be dropped'); } };
+  t.after(() => clearInterval((session as any).pingTimer));
+  (session as any).pingTimer = setInterval(() => (session as any).ping(), 10);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(session.isClosed, false);
+});
+
+test('a throwing listener neither escapes the socket reader nor drops the packets behind it', () => {
+  const session = new LocoSession();
+  const { aesKey } = createLocoV2Handshake();
+  (session as any).aesKey = aesKey;
+  const seen: string[] = [];
+  const errors: Error[] = [];
+  session.on('error', (e) => errors.push(e));
+  session.on('message', (m) => {
+    seen.push(String(m.messageId));
+    if (seen.length === 1) throw new Error('storage failed');
+  });
+  const msg = (logId: string) =>
+    frame(aesKey, 0, 'MSG', { chatId: BSON.Long.fromNumber(10), chatLog: { logId: BSON.Long.fromString(logId), chatId: BSON.Long.fromNumber(10), authorId: BSON.Long.fromNumber(5), type: 1, message: 'x', sendAt: 1 } });
+  assert.doesNotThrow(() => (session as any).onData(Buffer.concat([msg('111'), msg('222')])));
+  assert.deepEqual(seen, ['111', '222']);
+  assert.equal(errors.length, 1);
+});
+
+test('a throwing connected listener does not fail the connect or open a second connection', async (t) => {
+  const opened: LocoSession[] = [];
+  const connect = LocoSession.prototype.connect;
+  LocoSession.prototype.connect = function (this: LocoSession, ...args: Parameters<typeof connect>) {
+    opened.push(this);
+    return connect.apply(this, args);
+  };
+  const carriage = await silentCarriage(() => (opened.at(-1) ? sessionKey(opened.at(-1)!) : undefined));
+  const loco = {
+    getBookingConfig: async () => ({ ticketHosts: ['127.0.0.1'], ports: [carriage.port] }),
+    checkin: async () => ({ chatHost: '127.0.0.1', chatPort: carriage.port })
+  } as unknown as LocoClient;
+  const resilient = new ResilientLocoSession({ loco, userId: '1', accessToken: 'fixture-token', deviceUUID: 'fixture-device',
+    open: { maxAllocations: 1, backoffMs: 1 }, reconnect: { baseDelayMs: 1, maxDelayMs: 1 } });
+  t.after(() => { LocoSession.prototype.connect = connect; resilient.close(); carriage.stop(); });
+  const errors: Error[] = [];
+  resilient.on('error', (e) => errors.push(e));
+  resilient.on('connected', () => { throw new Error('storage failed'); });
+
+  const list = await resilient.start();
+  assert.equal(list.status, 0);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(carriage.connections, 1, 'exactly one connection on the device key');
+  assert.equal(opened.length, 1);
+  assert.equal(errors.length, 1);
 });

@@ -303,6 +303,31 @@ test('autoSaveMessageMedia cleans up temp file on size or checksum mismatch with
   }
 });
 
+test('a disk error while writing archived media fails that item without an unhandled stream error', async t => {
+  if (process.getuid?.() === 0) { t.skip('permissions are not enforced for root'); return; }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-write-error-test-'));
+  const db = KakaoDb.open({ dir });
+  const logs: string[] = [];
+  const vault = new LocalVault(db, path.join(dir, 'vault'), { vaultAutoSave: true, vaultDownloadDelayMs: 0 }, line => logs.push(line));
+  t.after(() => {
+    fs.chmodSync(vault.tmpDir, 0o700);
+    db.close();
+    removeTestDir(dir);
+  });
+  // The temporary file cannot be created, so the stream errors while the download is in flight.
+  fs.chmodSync(vault.tmpDir, 0o500);
+  const payload = Buffer.from('fixture-media');
+  const records = await vault.autoSaveMessageMedia('123456555', '987654777', 2, { k: 'tok_write_error', s: payload.length },
+    async (_token, _type, sink) => {
+      await new Promise(r => setTimeout(r, 20));
+      await sink(payload, 0, payload.length);
+      return { status: 0, size: payload.length };
+    });
+  assert.equal(records.length, 0);
+  assert.equal(fs.existsSync(path.join(vault.mediaDir, '123456555')) && fs.readdirSync(path.join(vault.mediaDir, '123456555')).length, 0);
+  assert.ok(logs.some(l => l.includes('auto-save media write failed')), logs.join('\n'));
+});
+
 test('autoSaveMessageMedia respects vaultMaxBytes and stops download', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-limit-test-'));
   const db = KakaoDb.open({ dir });

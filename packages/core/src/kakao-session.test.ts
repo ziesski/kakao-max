@@ -37,6 +37,22 @@ test('session and metadata diagnostics omit identifiers, content, paths and upst
   }
 });
 
+test('a message or connect event that fails to store is logged by code and does not escape into the LOCO reader', async t => {
+  const logs: string[] = [];
+  const { kakao, fake, stored, dir } = setup({}, [], true, line => logs.push(line));
+  t.after(() => { kakao.stop(); removeTestDir(dir); });
+  fake.connect();
+  // Not a canonical message id: the inbox refuses it.
+  assert.doesNotThrow(() => fake.emit('message', { chatId: CHAT, authorId: SELF, messageId: 'fixture-bad-id', type: 1, text: 'fixture-private-message', sendAt: 1, raw: {} }));
+  assert.doesNotThrow(() => fake.emit('connected', { endpoint: { host: 'loco.test', port: 443 }, loginList: { raw: {} } }));
+  fake.emit('message', { chatId: CHAT, authorId: SELF, messageId: '9007199254740995', type: 1, text: 'after', sendAt: 2, raw: {} });
+  assert.deepEqual(stored().map(m => m.messageId), ['9007199254740995'], 'the next message is still recorded');
+  const text = logs.join('\n');
+  assert.match(text, /message event handling failed: [A-Z_]+/);
+  assert.match(text, /connected event handling failed: [A-Z_]+/);
+  for (const privateValue of ['fixture-bad-id', 'fixture-private', CHAT, SELF]) assert.equal(text.includes(privateValue), false);
+});
+
 test('LOCO calls fail fast with NOT_CONNECTED until connected, and again while reconnecting', async () => {
   const { kakao, fake } = setup();
   await assert.rejects(kakao.sendMessage(CHAT, 'hi'), isCode('NOT_CONNECTED'));
@@ -628,14 +644,17 @@ test('durable inbox reads an unread approved room, preserves deny gates, recheck
 });
 
 test('push failure rolls message/work/cursor back before waking feed; restart recovers events without another push', async t => {
-  const { kakao, fake, dir } = setup();
+  const logs: string[] = [];
+  const { kakao, fake, dir } = setup({}, [], true, line => logs.push(line));
   const db = KakaoDb.open({ dir: kakao.config.dataDir });
   let restarted: KakaoSession | undefined;
   t.after(async () => { await restarted?.stop(); await kakao.stop(); db.close(); removeTestDir(dir); });
   fake.connect();
   const row = { chatId: CHAT, messageId: '9007199254740993', authorId: '42', type: 1, text: 'fixture transactional push', sendAt: 1, raw: {} };
   db.db.exec(`CREATE TRIGGER fixture_inbox_failure BEFORE INSERT ON message_inbox_events BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END`);
-  assert.throws(() => fake.emit('message', row), { code: 'INTERNAL' });
+  // The storage error is logged by code and contained; it never escapes into the LOCO reader.
+  assert.doesNotThrow(() => fake.emit('message', row));
+  assert.ok(logs.includes('message event handling failed: INTERNAL'), logs.join('\n'));
   assert.equal(kakao.cursor, 0); assert.equal(new MessageStore(db).getMessage(CHAT, row.messageId), undefined);
   assert.equal((db.db.prepare('SELECT COUNT(*) AS n FROM message_ingestion_cursors').get() as { n: number }).n, 0);
   db.db.exec('DROP TRIGGER fixture_inbox_failure'); fake.emit('message', row);

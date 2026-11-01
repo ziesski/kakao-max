@@ -37,6 +37,22 @@ test('session and metadata diagnostics omit identifiers, content, paths and upst
   }
 });
 
+test('a message or connect event that fails to store is logged by code and does not escape into the LOCO reader', async t => {
+  const logs: string[] = [];
+  const { kakao, fake, stored, dir } = setup({}, [], true, line => logs.push(line));
+  t.after(() => { kakao.stop(); removeTestDir(dir); });
+  fake.connect();
+  // Not a canonical message id: the inbox refuses it.
+  assert.doesNotThrow(() => fake.emit('message', { chatId: CHAT, authorId: SELF, messageId: 'fixture-bad-id', type: 1, text: 'fixture-private-message', sendAt: 1, raw: {} }));
+  assert.doesNotThrow(() => fake.emit('connected', { endpoint: { host: 'loco.test', port: 443 }, loginList: { raw: {} } }));
+  fake.emit('message', { chatId: CHAT, authorId: SELF, messageId: '9007199254740995', type: 1, text: 'after', sendAt: 2, raw: {} });
+  assert.deepEqual(stored().map(m => m.messageId), ['9007199254740995'], 'the next message is still recorded');
+  const text = logs.join('\n');
+  assert.match(text, /message event handling failed: [A-Z_]+/);
+  assert.match(text, /connected event handling failed: [A-Z_]+/);
+  for (const privateValue of ['fixture-bad-id', 'fixture-private', CHAT, SELF]) assert.equal(text.includes(privateValue), false);
+});
+
 test('LOCO calls fail fast with NOT_CONNECTED until connected, and again while reconnecting', async () => {
   const { kakao, fake } = setup();
   await assert.rejects(kakao.sendMessage(CHAT, 'hi'), isCode('NOT_CONNECTED'));
@@ -275,8 +291,7 @@ test('a history backfill treats only messages newer than what was known as new (
 
   const log = (id: string, text: string, sendAt: number) => ({ chatId: CHAT, authorId: '42', messageId: id, type: 1, text, sendAt, raw: {} });
   fake.replies.chatLogs = [{ status: 0, messages: [log('6000', 'old history', 60), log('8000', 'sent from the phone', 80)], eof: true, raw: {} }];
-  await assert.rejects(readHistory(kakao, CHAT, { limit: 50 }), isCode('ROOM_NOT_READ'));
-  // Backfill storage is trusted ingestion; a newly observed live message blocks exposure.
+  await readHistory(kakao, CHAT, { limit: 50 });
   assert.deepEqual(new MessageStore(KakaoDb.open({ dir: kakao.config.dataDir })).getMessages(CHAT).map(m => m.messageId), ['6000', '7000', '8000']);
   assert.equal(kakao.listChats().find(c => c.id === CHAT)?.unreadCount, 1);
   assert.deepEqual((await readRecent(kakao, head)).map((m) => m.messageId), ['8000'], 'only the newer one reaches the live feed');
@@ -385,7 +400,7 @@ test('default-deny content paths make no requests while receipt and storage cont
   assert.deepEqual(stored().map(m => m.text), ['private fixture']);
 });
 
-test('manual approval permits only this bounded read and cannot bypass unread or cross-room restrictions', async () => {
+test('manual approval permits only this bounded read, cannot bypass cross-room restrictions, and reads an unread room', async () => {
   const { kakao, fake } = setup({}, [], false);
   fake.connect(); phoneRead(kakao);
   kakao.setRoomAccess(CHAT, { mode: 'manual', maxMessages: 2 });
@@ -397,34 +412,30 @@ test('manual approval permits only this bounded read and cannot bypass unread or
   await assert.rejects(kakao.recentMessages(0), isCode('POLICY_DENIED'));
   fake.emit('message', { chatId: CHAT, authorId: '42', messageId: '9001', type: 1, text: 'fixture', sendAt: 1, raw: {} });
   const count = fake.calls.length;
-  await assert.rejects(kakao.searchMessages('fixture', { chatId: CHAT, limit: 1, confirmRead: true }), isCode('ROOM_NOT_READ'));
-  assert.equal(fake.calls.length, count, 'cached unread blocks even an approved manual read');
+  assert.deepEqual((await kakao.searchMessages('fixture', { chatId: CHAT, limit: 1, confirmRead: true })).map(m => m.messageId), ['9001']);
+  assert.equal(fake.calls.length, count, 'an approved read of an unread room needs no network call and sends no read receipt');
 });
 
-test('wait rechecks unread state and revocation before returning an arriving message', async () => {
+test('wait returns an arriving message to an approved room and rechecks revocation before returning', async () => {
   const { kakao, fake } = setup();
   fake.connect(); phoneRead(kakao);
   const waiting = kakao.waitForMessages(0, 100, CHAT);
   await new Promise(resolve => setImmediate(resolve));
   fake.emit('message', { chatId: CHAT, authorId: '42', messageId: '9001', type: 1, text: 'do not expose', sendAt: 1, raw: {} });
-  await assert.rejects(waiting, isCode('ROOM_NOT_READ'));
-  phoneRead(kakao);
+  assert.deepEqual((await waiting).map(m => m.messageId), ['9001']);
   const waiting2 = kakao.waitForMessages(kakao.cursor, 5, CHAT);
   await new Promise(resolve => setImmediate(resolve));
   kakao.setRoomAccess(CHAT, { mode: 'deny' });
   await assert.rejects(waiting2, isCode('POLICY_DENIED'));
 });
 
-test('content is refused when server counts are missing, become unread, or policy changes in flight', async () => {
+test('an approved room with unknown server counts is readable without a read-state request, and a narrowed rule refuses it', async () => {
   const { kakao, fake } = setup();
-  fake.connect(); phoneRead(kakao);
-  fake.replies.request = [{ header: { status: 0 }, data: { chatDatas: [] } }, { header: { status: 0 }, data: {} }];
-  await assert.rejects(kakao.searchMessages('fixture', { chatId: CHAT }), isCode('ROOM_NOT_READ'));
-  phoneRead(kakao);
-  fake.request = async () => {
-    kakao.setRoomAccess(CHAT, { mode: 'deny' });
-    return { header: { status: 0 }, data: { chatDatas: [{ c: CHAT, n: 0 }] } };
-  };
+  fake.connect();
+  const count = fake.calls.length;
+  assert.deepEqual(await kakao.searchMessages('fixture', { chatId: CHAT }), []);
+  assert.equal(fake.calls.length, count);
+  kakao.setRoomAccess(CHAT, { mode: 'deny' });
   await assert.rejects(kakao.searchMessages('fixture', { chatId: CHAT }), isCode('POLICY_DENIED'));
 });
 
@@ -618,11 +629,9 @@ test('per-message unread status reflects DECUNREAD watermarks and incoming repli
   assert.equal(msg102AfterReply?.unread, 0, 'outbound message before reply is automatically marked read');
 });
 
-test('durable inbox preserves unread/deny gates, rechecks permission at ack and makes no history/read-receipt call', async t => {
+test('durable inbox reads an unread approved room, preserves deny gates, rechecks permission at ack and makes no history/read-receipt call', async t => {
   const { kakao, fake, dir } = setup(); t.after(async () => { await kakao.stop(); removeTestDir(dir); });
   fake.connect(); fake.emit('message', { chatId: CHAT, messageId: '9007199254740993', authorId: '42', type: 1, text: 'fixture inbox', sendAt: 1, raw: {} });
-  await assert.rejects(kakao.claimMessageEvents(CHAT, 'worker'), { code: 'ROOM_NOT_READ' });
-  phoneRead(kakao);
   const batch = await kakao.claimMessageEvents(CHAT, 'worker', { limit: 10 });
   assert.equal(batch.events.length, 1); assert.equal(batch.events[0].messageId, '9007199254740993');
   const request = { chatId: CHAT, consumer: 'worker', sourceGeneration: batch.sourceGeneration, events: batch.events.map(({ eventId,leaseId }) => ({eventId,leaseId})) };
@@ -635,14 +644,17 @@ test('durable inbox preserves unread/deny gates, rechecks permission at ack and 
 });
 
 test('push failure rolls message/work/cursor back before waking feed; restart recovers events without another push', async t => {
-  const { kakao, fake, dir } = setup();
+  const logs: string[] = [];
+  const { kakao, fake, dir } = setup({}, [], true, line => logs.push(line));
   const db = KakaoDb.open({ dir: kakao.config.dataDir });
   let restarted: KakaoSession | undefined;
   t.after(async () => { await restarted?.stop(); await kakao.stop(); db.close(); removeTestDir(dir); });
   fake.connect();
   const row = { chatId: CHAT, messageId: '9007199254740993', authorId: '42', type: 1, text: 'fixture transactional push', sendAt: 1, raw: {} };
   db.db.exec(`CREATE TRIGGER fixture_inbox_failure BEFORE INSERT ON message_inbox_events BEGIN SELECT RAISE(ABORT,'fixture disk failure'); END`);
-  assert.throws(() => fake.emit('message', row), { code: 'INTERNAL' });
+  // The storage error is logged by code and contained; it never escapes into the LOCO reader.
+  assert.doesNotThrow(() => fake.emit('message', row));
+  assert.ok(logs.includes('message event handling failed: INTERNAL'), logs.join('\n'));
   assert.equal(kakao.cursor, 0); assert.equal(new MessageStore(db).getMessage(CHAT, row.messageId), undefined);
   assert.equal((db.db.prepare('SELECT COUNT(*) AS n FROM message_ingestion_cursors').get() as { n: number }).n, 0);
   db.db.exec('DROP TRIGGER fixture_inbox_failure'); fake.emit('message', row);
@@ -670,14 +682,13 @@ test('known-new history sync stores its message and durable event atomically bef
   assert.deepEqual(events.events.map(e => e.messageId), ['1','2']);
 });
 
-test('mutation inspection enforces source visibility/unread, detaches approved bytes and detects later source changes',async t=>{
+test('mutation inspection enforces source visibility, reads an unread approved room, detaches approved bytes and detects later source changes',async t=>{
   const {kakao,fake,dir}=setup();const db=KakaoDb.open({dir:kakao.config.dataDir});
   t.after(()=>{kakao.stop();db.close();removeTestDir(dir);});
   const message={chatId:CHAT,messageId:'9007199254740993',authorId:SELF,type:20,text:'fixture original',attachment:' {"name":"fixture","path":"fixture/path","alt":"fixture"} ',sendAt:1,raw:{}};
   fake.connect();fake.emit('message',message);
   fake.emit('connected',{endpoint:{host:'loco.test',port:443},loginList:{conversations:[{id:CHAT,type:'DirectChat',unreadCount:1,raw:{}}],raw:{}}});
-  await assert.rejects(kakao.inspectAgentStoredMessage(CHAT,message.messageId),{code:'ROOM_NOT_READ'});
-  phoneRead(kakao);const source=await kakao.inspectAgentStoredMessage(CHAT,message.messageId);
+  const source=await kakao.inspectAgentStoredMessage(CHAT,message.messageId);
   assert.equal(source.emoticonSupported,true);source.target.text='mutated by caller';
   const packets:any[]=[];(fake as any).sendEmoticonRaw=async(...args:any[])=>{packets.push(args);return {status:0,logId:'9007199254740994',raw:{}};};
   await source.sendEmoticonTo(CHAT);
@@ -700,7 +711,6 @@ test('open-room read receipt ACK preserves server unread and reports verificatio
   assert.equal(result.status, 0);
   assert.deepEqual(result.readState, { confirmed: false, reason: 'server_unread', localUnreadCount: 31, serverUnreadCount: 31 });
   assert.equal(kakao.listChats()[0].unreadCount, 31);
-  await assert.rejects(kakao.getHistory(CHAT), isCode('ROOM_NOT_READ'));
   assert.equal(fake.calls.filter(c => c.method === 'markRead').length, 1);
   assert.equal(fake.calls.filter(c => c.method === 'chatLogs').length, 0);
 });
@@ -795,7 +805,7 @@ test('range read rejects naive dates and revocation during provider fetch expose
   assert.deepEqual(stored().map(m => m.messageId), ['300']);
 });
 
-test('ask blocks reading a room with unread messages; trust reads it, also without a room rule, and never marks it read', async () => {
+test('both modes read an approved room with unread messages, trust also without a room rule, and never mark it read', async () => {
   const unreadRoom = async (mode: 'ask' | 'trust', grantAccess: boolean) => {
     const { kakao, fake } = setup({ KAKAO_AGENT_MODE: mode }, [], grantAccess);
     fake.connect();
@@ -805,12 +815,14 @@ test('ask blocks reading a room with unread messages; trust reads it, also witho
   };
 
   const ask = await unreadRoom('ask', true);
-  await assert.rejects(ask.kakao.recentMessages(0, CHAT), isCode('ROOM_NOT_READ'));
-  assert.equal(ask.kakao.getRoomAccess(CHAT).unreadRestriction, 'confirmed-read-only');
+  assert.deepEqual((await ask.kakao.recentMessages(0, CHAT)).map(m => m.messageId), ['7100']);
+  assert.equal(ask.kakao.listChats().find(c => c.id === CHAT)?.unreadCount, 1, 'reading leaves the room unread');
+  assert.equal(ask.fake.calls.filter(c => c.method === 'markRead').length, 0);
+  const askDenied = await unreadRoom('ask', false);
+  await assert.rejects(askDenied.kakao.recentMessages(0, CHAT), isCode('POLICY_DENIED'));
 
   const trust = await unreadRoom('trust', false);
   assert.deepEqual((await trust.kakao.recentMessages(0, CHAT)).map(m => m.messageId), ['7100']);
-  assert.equal(trust.kakao.getRoomAccess(CHAT).unreadRestriction, 'none');
   assert.equal(trust.kakao.listChats().find(c => c.id === CHAT)?.unreadCount, 1, 'reading leaves the room unread');
   assert.equal(trust.fake.calls.filter(c => c.method === 'markRead').length, 0);
 
@@ -949,11 +961,10 @@ test('unknown cached read state is distinguished from a positive unread estimate
   const { kakao, fake } = setup();
   fake.emit('connected', { endpoint: { host: 'fixture', port: 443 }, loginList: {
     conversations: [{ id: CHAT, type: 'OD', raw: {} }], raw: {} } });
-  await assert.rejects(kakao.getHistory(CHAT), (e: any) => e.code === 'ROOM_NOT_READ' && e.details.reason === 'unread_unknown');
-  assert.equal(fake.calls.length, 0);
+  assert.equal(kakao.listChats().find(c => c.id === CHAT)?.unreadCount ?? null, null);
   phoneRead(kakao);
   fake.emit('message', { chatId: CHAT, messageId: '100', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
-  await assert.rejects(kakao.getHistory(CHAT), (e: any) => e.code === 'ROOM_NOT_READ' && e.details.reason === 'local_unread');
+  assert.equal(kakao.listChats().find(c => c.id === CHAT)?.unreadCount, 1);
 });
 
 
@@ -994,12 +1005,12 @@ test('trust message watches are idle and receipt-free signals, while actual deli
   await new Promise(resolve => setImmediate(resolve)); assert.equal(changes.length, count); stop();
 });
 
-test('ask message watches stop before signaling a newly unread message', async () => {
+test('ask message watches signal a newly unread message in an approved room', async () => {
   const { kakao, fake } = setup(); phoneRead(kakao);
   const changes: Array<string | undefined> = [];
   const stop = await kakao.watchRoomMessages(CHAT, code => changes.push(code));
   fake.emit('message', { chatId: CHAT, messageId: '101', authorId: '42', text: 'fixture', type: 1, sendAt: 1, raw: {} });
-  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(changes, ['ROOM_NOT_READ']); stop();
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(changes, [undefined]); stop();
 });
 
 test('expiring watch authorization is rechecked without another content request', async () => {

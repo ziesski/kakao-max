@@ -34,11 +34,11 @@
 | 방 목록·상세·안읽음 | `list_chats` | ✅ | ✅ 2026-10-25 테스트 계정·SSH 터널 MCP 직접 호출: 목록 untrusted 표시, chatId+refresh 상세(멤버·접근 규칙). 전체 목록 refresh는 chatId 필요(INVALID_ARGUMENT). 단위: chatId 상세(멤버·접근 규칙), `refreshReadState`는 metadata만, `unreadOnly`는 서버 갱신 | 이전 `list_chats`·`get_chat_info`·`get_unread_summary`·`get_room_access` ✅(2026-10-18~22, read state server_unread 확인) |
 | 방 찾기 | `find_chat` | ✅ | ✅ 2026-10-26 테스트 서버: `memberCount=1`만으로 나와의 채팅(MemoChat) 1건, ambiguous=false. 이전(2026-10-25)에는 인원수를 모르는 방을 빼던 필터 때문에 searched 0이었고 이후 수정에서 고침. 단위: 이름·참여자·인원수, 모호하면 ambiguous/incomplete | ✅ 2026-10-24 테스트 서버 지정 두 방 이름 검색 각각 1page/유일 후보(이전 surface, 도구 동일) |
 | 친구 찾기 | `list_friends` | ✅ | ✅ 2026-10-25 테스트 계정·SSH 터널 MCP 직접 호출: 친구 18명, 전화번호 필드 없음. 단위 | 이전 `list_friends` ✅ 2026-10-18 주소록 검색. 전화번호는 저장·반환 안 함 |
-| 메시지 읽기 | `read_messages` | ✅ | ✅ 2026-10-25 테스트 계정·터미널 Claude Code 2.1.308 확인 창: 권한 없는 나와의 채팅 history·search·가짜 grant 모두 POLICY_DENIED·본문 0, 승인된 일회성 grant(5개·1회·10분)로 1건 조회 후 usesLeft 0. 2026-10-26: 나와의 채팅에 이전 검증의 manual 규칙이 저장돼 있어 기본 허용 대신 확인 창 요청 → 데스크톱 앱 Code 탭이 자동 거절(POLICY_DENIED). 저장 규칙이 기본값보다 우선하는 설계대로. 터미널 CLI에서 `room_access immediate` 승인 뒤 무확인 읽기 ✅. 규칙이 없는 상태의 나와의 채팅 기본 허용과 한 번 호출 확인 창(이번만/항상) 승인 경로는 여전히 단위·격리 MCP 통합만🟡. 단위: history(로그 범위·날짜 범위+cursor)·recent·wait·search, 모드별 인자 분리, read grant 범위 `read_messages` | 이전 `get_history`·`get_recent_messages`·`wait_for_messages`·`search_messages` ✅(2026-10-18, 날짜 범위 2026-10-24 2pages/31records). 기본 deny, 명시 방·fresh unread0 필요. 읽음 표시 없음 |
+| 메시지 읽기 | `read_messages` | ✅ | ✅ 2026-10-25 테스트 계정·터미널 Claude Code 2.1.308 확인 창: 권한 없는 나와의 채팅 history·search·가짜 grant 모두 POLICY_DENIED·본문 0, 승인된 일회성 grant(5개·1회·10분)로 1건 조회 후 usesLeft 0. 2026-10-26: 나와의 채팅에 이전 검증의 manual 규칙이 저장돼 있어 기본 허용 대신 확인 창 요청 → 데스크톱 앱 Code 탭이 자동 거절(POLICY_DENIED). 저장 규칙이 기본값보다 우선하는 설계대로. 터미널 CLI에서 `room_access immediate` 승인 뒤 무확인 읽기 ✅. 규칙이 없는 상태의 나와의 채팅 기본 허용과 한 번 호출 확인 창(이번만/항상, 답장도 묻지 않기) 승인 경로는 여전히 단위·격리 MCP 통합만🟡. 단위: history(로그 범위·날짜 범위+cursor)·recent·wait·search, 모드별 인자 분리, read grant 범위 `read_messages` | 이전 `get_history`·`get_recent_messages`·`wait_for_messages`·`search_messages` ✅(2026-10-18, 날짜 범위 2026-10-24 2pages/31records). 기본 deny, 명시 방·fresh unread0 필요. 읽음 표시 없음 |
 | 숫자1 유지 미리보기 | `preview_unread` | 🟡 | 2026-10-25 테스트 서버: readGrantId 없으면 인자 단계 거부만 확인. 단위: manual 방 frozen bound + read grant `preview_unread`, agent `confirmRead` 거절 | 이전 `preview_unread_messages` ✅ 2026-10-22 지정 1:1 사용자 화면에서 1 유지 확인. 인계 |
 | 받은 첨부 다운로드 | `download_attachment` | ✅ | ✅ 2026-10-26 테스트 서버·SSH 터널 MCP 직접 호출: 나와의 채팅 사진 `save=true` → `<dataDir>/downloads/<chatId>/<messageId>-<임의>`에 저장, SHA-1이 첨부 `cs`와 일치, 파일 600·폴더 700(서비스 사용자), `outputPath`는 unknown argument로 거부. 데스크톱 앱은 재시작 전 도구 목록을 써 `save`를 문자열로 보냈다(서버가 boolean 아님으로 거부). 단위 | 이전 `download_media` ✅ 2026-10-18 원본 SHA-1 일치, 2026-10-20 MINI 썸네일. 이제 에이전트가 고른 경로에 쓰지 않는다: 기본은 dataBase64, `save=true`는 `<dataDir>/downloads/<chatId>/`에만 저장(단위🟡). CLI는 받은 바이트를 자기 쪽에 쓴다 |
 | 텍스트·답장·멘션 | `send_message` | ✅ | ✅ 2026-10-25 테스트 계정·터미널 Claude Code 2.1.308 확인 창: 첫 전송 확인 창 승인+묻지 않기→방 허가 생성, 두 번째 무확인(방 허가 사용), 철회 후 다시 확인 창, pause 중 POLICY_DENIED. 휴대폰 도착 확인. ✅ 2026-10-26: 방 허가 없는 나와의 채팅에 확인 창 없이 전송(sent_unverified). 단위/fixture: 한 번 호출, 허용 방 즉시, 아니면 확인 창 → 같은 requestId로 발신, 중복 0. 결과 판정(🟡 단위만): 연결 전·서버 거절은 "보내지 않음"으로 같은 requestId 재전송, 응답 유실은 requestId에서 정한 클라이언트 메시지 ID로 방 기록을 찾아 보냄/미전달로 정리. ❓ 서버 기록이 내 메시지의 msgId를 돌려주는지는 실계정 미확인 | 이전 2단계 계약 ✅ 2026-10-24 테스트 서버 첫 승인 발신·도착 확인, 같은 방 두 번째 무확인 발신. 답장 ✅ 2026-10-18, 멘션 ✅ 2026-10-20 |
-| 사진·파일·묶음 | `send_photos` | ✅ | ✅ 2026-10-25 테스트 계정·터미널 Claude Code 2.1.308 확인 창: inline 32×32 이미지 1장, 같은 방 허가로 무확인 전송, 휴대폰 도착 확인. 묶음·파일은 이번에 미시험. 단위: inline base64만, 데몬 파일 경로 거절, 묶음 중간 pause → unknown | 이전 `send_media` ✅ 2026-10-18(사진·파일 체크섬 일치), `send_photo_bundle` ✅ 2026-10-22(두 사진 한 묶음 휴대폰 확인) |
+| 사진·파일·묶음 | `send_photos` | ✅ | ✅ 2026-10-25 테스트 계정·터미널 Claude Code 2.1.308 확인 창: inline 32×32 이미지 1장, 같은 방 허가로 무확인 전송, 휴대폰 도착 확인. 묶음·파일은 이번에 미시험. 단위: inline base64만, 데몬 파일 경로 거절, 묶음 중간 pause → unknown, 허가 없는 방의 첫 사진 확인 창은 방 전송 허가로 묻고 올바른 코드에만 허가(🟡, 실계정 미확인) | 이전 `send_media` ✅ 2026-10-18(사진·파일 체크섬 일치), `send_photo_bundle` ✅ 2026-10-22(두 사진 한 묶음 휴대폰 확인) |
 | 메시지 수정·삭제 | `edit_or_delete_message` | 🟡 | 2026-10-25 테스트 서버: 나와의 채팅 삭제 확인 창 승인 후 서버 수락(applied_unverified), 휴대폰 표시 미확인. manual 방은 첫 시도에 confirmRead 필요로 거부됨(이후 수정에서 다음 행동을 알려 주는 오류로 바꿈, 2026-10-26 그 오류 문구 확인). ✅ 2026-10-26: 읽기 규칙 immediate인 나와의 채팅에서 내 메시지 삭제가 확인 창 없이 서버 수락(applied_unverified), 다시 읽은 저장소에서도 사라짐. 휴대폰 표시는 미확인. 단위: 나와의 채팅의 내 메시지는 승인 없음, 그 밖에는 항상 사람 승인, 내 저장 메시지만 | 이전 `edit_message` ✅ 2026-10-19, `delete_message` ✅ 2026-10-18 |
 | 권한 목록 | `list_permissions` | ✅ | ✅ 2026-10-25 테스트 계정·SSH 터널 MCP 직접 호출: 전송 방·읽기 규칙·grant 개수, untrusted 표시. 단위: 무확인 전송 방(`recipient:`), 읽기 규칙(`room:`), 일회성 read grant, 본문 없음 | 이전 `list_grants` 🟡 |
 | 권한 철회 | `revoke_permission` | ✅ | ✅ 2026-10-25 테스트 계정·터미널 Claude Code 2.1.308 확인 창: `recipient:` 철회 즉시 적용, 다음 전송은 방 허가 없이 새 확인 창 승인. 단위: 즉시, 승인 불필요, `room:`은 deny로 | 이전 `revoke_grant` 🟡(철회 후 보류 재시도 거부 `grant-revocation.test.ts`). 실계정 철회 ❓ |
@@ -135,7 +135,18 @@
 | 공통 MCP 조회·모드 표시 | 🟡 | fixture: get_status/list_chats/read_messages만 사용, ask/trust 표시, 정책 오류 그대로 전달·fallback/모드 변경 없음, recent cursor·중복 제거·200개 상한·이전 방 지연 응답 폐기 |
 | 붙여넣기·승인·전송 오류 | 🟡 | fixture: 붙여넣기 자동 제출 방지·사람 입력 승인·remember=false 기본·이번만 읽기 뒤 polling 중지·결과 불명 후 새 전송 차단. 기존 메신저 발신은 사용자 수신 확인; 이번 통합 이후 실제 발신은 미시험 |
 
-기존 소유자 전용 조회 경로의 실계정 증거는 현재 MCP 경로의 검증으로 간주하지 않습니다. ask는 안읽은 방 제한을 유지하고, trust는 해당 제한을 해제하지만 명시한 방 제한과 운영자 상한은 유지합니다. 과거 메시지 수정·삭제의 완전한 자동 반영은 보장하지 않으며 수동 refresh로 최근 기록을 재조회합니다.
+기존 소유자 전용 조회 경로의 실계정 증거는 현재 MCP 경로의 검증으로 간주하지 않습니다. 두 모드 모두 허가한 방은 안 읽은 메시지가 있어도 읽으며, 명시한 방 제한과 운영자 상한은 유지합니다. 과거 메시지 수정·삭제의 완전한 자동 반영은 보장하지 않으며 수동 refresh로 최근 기록을 재조회합니다.
+
+
+### 웹 화면 (`apps/web`)
+
+`npm run web`(`kakao web`, 패키지의 `kakao-max-web`)은 데몬의 MCP 클라이언트인 로컬 브라우저 화면입니다. 새 도구·로그인 경로를 추가하지 않으며, 아래는 모두 실계정에서 확인하지 않았습니다.
+
+| 기능 | 상태 | 검증 범위 |
+|---|---|---|
+| 쓰기의 requestId 유지·결과 불명 표시 | 🟡 | 단위·fixture: 페이지가 작업마다 고른 UUID를 서버가 그대로 전달(서버는 만들지 않음), 호출 중 연결 끊김·시간 초과·`SEND_OUTCOME_UNKNOWN`·`MUTATION_OUTCOME_UNKNOWN`을 코드와 함께 결과 불명으로 응답, 다시 확인은 같은 requestId 재사용(전송·삭제·전달·나가기·읽음 표시). 브라우저 fixture에서 연결 끊김 뒤 말풍선 유지·같은 요청 재확인 화면 확인. 실계정 재전송·데몬 재생 응답은 미확인 |
+| 제어판: 연결·모드 표시, 일시정지·해제 요청, 권한 목록·철회, 대기 승인 | 🟡 | 실제 MCP 서버·권한 도구·승인 엔진·확인 창 승인(임시 디렉터리) fixture: 모드는 표시만, pause(true) 즉시, 해제는 중계된 확인 창에 사람이 입력한 코드로만(거절·무응답이면 유지), 철회 즉시 반영. GUI 서버 프로세스로 실행 세션·교차 사이트·JSON 전용 검사 확인. 실계정 미확인 |
+| `--ssh`로 서버의 데몬 연결 | 🟡 | 단위: 대상 검증(설정·커넥터와 같은 규칙), 서버 루프백만 허용, `ssh -W` 인자(원격 명령·로컬 포트 없음). 가짜 ssh 프로세스로 MCP 왕복과 ssh 종료 뒤 재연결 확인. 실제 SSH 서버 연결은 미확인 |
 
 
 ## MCP 이벤트 구독

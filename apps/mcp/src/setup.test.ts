@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { connectionConfig, runSetup, saveConnection, resolveClientConfigFile } from './setup.ts';
+import { connectionConfig, runSetup, saveConnection, resolveClientConfigFile, registrationHint, modeSettingsTarget, MANAGED_ENV } from './setup.ts';
 import { confirmSetup } from './setup-prompts.ts';
 
 test('setup confirmations accept simple answers and Enter defaults, and retry invalid input', async () => {
@@ -87,6 +87,36 @@ test('new-user wizard carries an alternate installation port into connection set
     install: port => { installedPort = port; return true; }, log: () => {}, output: () => {},
     diagnose: async options => { diagnosed = options.listen; return { status: 'ready', connected: true, nextAction: 'fixture' }; } });
   assert.equal(installedPort, 18787); assert.equal(diagnosed, '127.0.0.1:18787');
+});
+
+test('right after a server install the wizard asks no SSH questions and prints ready-to-run client commands', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'setup-installed-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const asked: string[] = [], logs: string[] = [], answers = ['2', 'y', '18787'];
+  let output = '';
+  await runSetup({ repo: root, platform: 'linux', configFile: path.join(root, 'settings/mcp.json'),
+    prompt: async q => { asked.push(q); return answers.shift() ?? ''; }, install: () => true, log: s => logs.push(s), output: s => { output = s; } });
+  assert.equal(asked.length, 3, 'only the choice, the install confirmation and the port');
+  const args = JSON.parse(output).mcpServers['kakao-max'].args as string[];
+  assert.ok(args.includes('127.0.0.1:18787')); assert.ok(!args.includes('--ssh'));
+  const text = logs.join('\n');
+  assert.match(text, /claude mcp add --scope user kakao-max -- /); assert.match(text, /codex mcp add kakao-max -- /);
+  assert.match(text, /--config --ssh <이 서버의 SSH 대상> --listen 127\.0\.0\.1:18787/);
+});
+
+test('client commands quote paths with spaces for the platform shell', () => {
+  const config = { mcpServers: { 'kakao-max': { command: '/opt/my node/bin/node', args: ['connect.mjs', '--listen', '127.0.0.1:8787', "it's"] } } };
+  assert.ok(registrationHint(config, 'linux').includes(`-- '/opt/my node/bin/node' connect.mjs --listen 127.0.0.1:8787 'it'\\''s'`));
+  const win = { mcpServers: { 'kakao-max': { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['--listen', '127.0.0.1:8787'] } } };
+  assert.ok(registrationHint(win, 'win32').includes('-- "C:\\Program Files\\nodejs\\node.exe" --listen 127.0.0.1:8787'));
+});
+
+test('--mode writes the managed daemon settings on an installed server, through sudo when not root', () => {
+  const nearest = () => '/home/fixture/checkout/.env.local';
+  assert.deepEqual(modeSettingsTarget({ platform: 'linux', managedInstalled: true, isRoot: false, nearest }), { envPath: MANAGED_ENV, managed: true, needsSudo: true });
+  assert.deepEqual(modeSettingsTarget({ platform: 'linux', managedInstalled: true, isRoot: true, nearest }), { envPath: MANAGED_ENV, managed: true, needsSudo: false });
+  assert.deepEqual(modeSettingsTarget({ platform: 'linux', managedInstalled: false, isRoot: false, nearest }), { envPath: nearest(), managed: false, needsSudo: false });
+  assert.deepEqual(modeSettingsTarget({ platform: 'darwin', managedInstalled: true, isRoot: false, nearest }), { envPath: nearest(), managed: false, needsSudo: false });
+  assert.deepEqual(modeSettingsTarget({ env: '/tmp/x/.env.local', platform: 'linux', managedInstalled: true, isRoot: false, nearest }), { envPath: '/tmp/x/.env.local', managed: false, needsSudo: false });
 });
 
 test('resolveClientConfigFile defaults to kakao-max and falls back to legacy kakaotalk-mcp when only legacy exists', async t => {

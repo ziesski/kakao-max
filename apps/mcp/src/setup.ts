@@ -75,6 +75,30 @@ export function setAgentMode(opts: { envPath: string; mode: string; acceptRisk: 
   return mode;
 }
 
+/** Ready-to-run registration for common MCP clients; other clients take the printed JSON. */
+export function registrationHint(config: McpConnectionConfig, platform: string = process.platform): string {
+  const { command, args } = config.mcpServers['kakao-max'];
+  const quote = (s: string) => /^[A-Za-z0-9_./:@=+-]+$/.test(s) ? s : platform === 'win32' ? `"${s}"` : `'${s.replace(/'/g, `'\\''`)}'`;
+  const line = [command, ...args].map(quote).join(' ');
+  return [`  Claude Code:  claude mcp add --scope user kakao-max -- ${line}`, `  Codex:        codex mcp add kakao-max -- ${line}`,
+    '  그 밖의 클라이언트(Claude Desktop 등): 아래 JSON의 mcpServers 항목을 그 설정에 넣으세요.'].join('\n');
+}
+
+const MANAGED_ROOT = '/var/lib/kakao-max';
+/** The managed daemon's settings file; written as root, keeping its owner (the service account). */
+export const MANAGED_ENV = path.join(MANAGED_ROOT, 'app/.env.local');
+
+/**
+ * Where `--mode` writes. On a server with a managed install that is the daemon's own settings file, which
+ * needs root; elsewhere (a development checkout) the nearest .env.local. An explicit --env always wins.
+ */
+export function modeSettingsTarget(o: { env?: string; platform: string; managedInstalled: boolean; isRoot: boolean; nearest(): string }):
+  { envPath: string; managed: boolean; needsSudo: boolean } {
+  if (o.env) return { envPath: o.env, managed: o.env === MANAGED_ENV, needsSudo: false };
+  if (o.platform === 'linux' && o.managedInstalled) return { envPath: MANAGED_ENV, managed: true, needsSudo: !o.isRoot };
+  return { envPath: o.nearest(), managed: false, needsSudo: false };
+}
+
 export async function runSetup(deps: {
   prompt: SetupPrompt; log(text: string): void; output(text: string): void;
   configFile: string; repo: string; platform: string; install(port?: number): boolean;
@@ -90,17 +114,23 @@ export async function runSetup(deps: {
     installedPort = installPort(((await deps.prompt('설치할 MCP 포트 (Enter: 8787): ')) ?? '').trim() || '8787');
     if (!deps.install(installedPort)) return;
   } else if (choice !== '1') return;
-  const ssh = (await deps.prompt('내 AI에서 접속할 SSH 대상(user@host 또는 SSH 별칭), 같은 컴퓨터면 Enter: ')).trim();
+  // Just installed here: this computer reaches the daemon directly, so there is nothing to ask.
+  const ssh = installedPort !== undefined ? '' : (await deps.prompt('내 AI에서 접속할 SSH 대상(user@host 또는 SSH 별칭), 같은 컴퓨터면 Enter: ')).trim();
   const defaultListen = `127.0.0.1:${installedPort ?? 8787}`;
-  const listen = ((await deps.prompt(`서버 MCP 주소 (Enter: ${defaultListen}, 다른 포트면 127.0.0.1:포트): `)) ?? '').trim() || defaultListen;
+  const listen = installedPort !== undefined ? defaultListen
+    : ((await deps.prompt(`서버 MCP 주소 (Enter: ${defaultListen}, 다른 포트면 127.0.0.1:포트): `)) ?? '').trim() || defaultListen;
   const config = connectionConfig({ ssh: ssh || undefined, listen, repo: deps.repo });
   const resolved = resolveClientConfigFile();
   if (resolved.isFallback && resolved.file === deps.configFile) {
     deps.log(`기존 설정 파일 사용: ${deps.configFile}. kakao-max 기본 경로로 옮기려면 디렉터리를 ~/.config/kakao-max 로 이동하세요.`);
   }
   await saveConnection(deps.configFile, config, deps.prompt);
-  deps.log(`연결 설정 저장: ${deps.configFile}. AI의 MCP 설정에 등록하세요. 기존 설정 파일은 자동 편집하지 않습니다.`);
+  deps.log(`연결 설정 저장: ${deps.configFile}. 기존 AI 설정 파일은 자동 편집하지 않습니다. AI에 등록하려면:`);
+  deps.log(registrationHint(config, deps.platform));
   deps.output(JSON.stringify(config, null, 2));
+  if (installedPort !== undefined) {
+    deps.log(`AI를 다른 컴퓨터에서 쓴다면 그 컴퓨터에서 실행하세요: ${setupCommand(`--config --ssh <이 서버의 SSH 대상>${installedPort === 8787 ? '' : ` --listen ${listen}`}`)}`);
+  }
   if (deps.diagnose) {
     const result = await deps.diagnose({ listen, ssh: ssh || undefined });
     deps.log(result.connected ? '서버 연결 정상. AI에 방 이름과 원하는 작업을 말하면 됩니다. 방별 권한은 필요한 시점에 별도로 요청합니다.' : `설정은 저장했지만 연결 확인이 필요합니다. ${result.nextAction}`);
@@ -141,13 +171,26 @@ if (isMainModule(import.meta.url, 'setup')) {
       return;
     }
     if (args[0] === '--mode') {
-      const rest = args.slice(2), opts = { envPath: findEnvFile(), acceptRisk: false };
+      const rest = args.slice(2), opts: { env?: string; acceptRisk: boolean } = { acceptRisk: false };
       for (let i = 0; i < rest.length; i++) {
         if (rest[i] === '--accept-risk' && !opts.acceptRisk) opts.acceptRisk = true;
-        else if (rest[i] === '--env' && rest[i + 1]) opts.envPath = path.resolve(rest[++i]);
+        else if (rest[i] === '--env' && rest[i + 1] && !opts.env) opts.env = path.resolve(rest[++i]);
         else throw new KakaoError('INVALID_ARGUMENT', 'Use --mode ask|trust [--accept-risk] [--env path/to/.env.local]');
       }
-      setAgentMode({ ...opts, mode: args[1] ?? '', log: s => process.stderr.write(s + '\n') });
+      const target = modeSettingsTarget({ env: opts.env, platform: process.platform, isRoot: process.getuid?.() === 0,
+        managedInstalled: fs.existsSync(path.join(MANAGED_ROOT, 'install-state.json')), nearest: () => findEnvFile() });
+      if (target.needsSudo) {
+        const result = sudoProgram('setup', ['--mode', args[1] ?? '', ...(opts.acceptRisk ? ['--accept-risk'] : []), '--env', target.envPath]);
+        process.exitCode = result.status === 0 ? 0 : 1; return;
+      }
+      setAgentMode({ envPath: target.envPath, acceptRisk: opts.acceptRisk, mode: args[1] ?? '', log: s => process.stderr.write(s + '\n') });
+      if (!target.managed) return;
+      // The daemon reads the mode at start. A pause set while it runs does not survive a restart.
+      let restart = false;
+      try { restart = await confirmSetup(terminalPrompt, '지금 서비스를 다시 시작해 적용할까요? 실행 중에 건 일시정지는 풀립니다.', true); } catch { /* no terminal */ }
+      if (!restart) { process.stderr.write('적용하려면: sudo systemctl restart kakao-max\n'); return; }
+      const restarted = spawnSync('systemctl', ['restart', 'kakao-max'], { stdio: 'inherit' });
+      if (restarted.status !== 0) throw new KakaoError('CONFIG_INVALID', 'The mode was saved but the service did not restart; run sudo systemctl restart kakao-max');
       return;
     }
     if (args[0] === '--config') {

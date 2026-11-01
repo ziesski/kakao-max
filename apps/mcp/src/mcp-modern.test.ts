@@ -152,6 +152,29 @@ test('binary publications and oversized drafts are never approved from a text di
   assert.match(approvalMessage(envelope('leave_chat', { chatId: '1', silence: false, block: false }))!, /방 나가기 승인 요청/);
 });
 
+test('a photo send asks for the room\'s send permission, granted only with the right code', () => {
+  const confirmed: string[] = [], granted: string[] = [];
+  const store = { envelopeDigest: () => 'fixture-digest', reject: () => {}, recordClientConfirmation: (id: string) => { confirmed.push(id); } };
+  const recipients = { grant: (chatId: string) => { granted.push(chatId); } };
+  const client = { name: 'fixture-client', elicitation: true };
+  for (const [action, message] of [['send_media', { chatId: '123456789', sha256: 'a'.repeat(64), type: 2 }], ['send_photo_bundle', { chatId: '123456789', photos: [] }]] as const) {
+    confirmed.length = 0; granted.length = 0;
+    const args = { requestId: 'fixture-request', chatId: '123456789' };
+    const approval = { requestId: 'fixture-request', signingText: JSON.stringify({ action, accountId: '1', requestId: 'fixture-request', message }), expiresAt: Date.now() + 60_000 };
+    assert.equal(new ElicitationApprovals(store as never).request(action, args, approval, client), undefined, `${action}: no room permission to offer`);
+    const gate = new ElicitationApprovals(store as never, Date.now, recipients as never);
+    const ask = gate.request(action, args, approval, client)!;
+    const form = ask.inputRequests.approve.params as any;
+    assert.match(form.message, /대화방 메시지·사진 전송 허가 승인 요청/);
+    assert.match(form.message, /사진은 확인 창에 보여 줄 수 없어/);
+    assert.deepEqual(Object.keys(form.requestedSchema.properties), ['code'], `${action}: accepting is the room permission itself`);
+    assert.equal(gate.answer(action, args, ask.requestState, { approve: { action: 'accept', content: { code: '' } } }, client), 'mismatch');
+    assert.deepEqual(granted, []);
+    assert.equal(gate.answer(action, args, ask.requestState, accept(codeOf(ask)), client), 'approved');
+    assert.deepEqual(granted, ['123456789']); assert.deepEqual(confirmed, ['fixture-request']);
+  }
+});
+
 for (const roomPermissions of [false, true]) test(`assistant profile: first-send permission, later sends and revocation (rooms=${roomPermissions})`, async t => {
   const f = approvalFixture(t, true, true, roomPermissions), call = connect(f.server, t);
   const send = async (text: string) => {

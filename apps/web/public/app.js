@@ -31,13 +31,50 @@ let lockCode = localStorage.getItem('kakaoweb_lock_code') || '1234';
 // API Helper
 // ----------------------------------------------------------------------------
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    // The request may have reached this GUI's server before the connection failed.
+    const err = new Error('화면 서버와 연결이 끊겼습니다');
+    err.code = 'GUI_SERVER_UNREACHABLE';
+    err.uncertain = opts?.method === 'POST';
+    throw err;
+  }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const message = err.error || res.statusText;
-    throw new Error(err.approvalUrl ? `${message}\n승인 링크: ${err.approvalUrl}` : message);
+    const body = await res.json().catch(() => ({}));
+    const message = body.error || res.statusText;
+    const err = new Error(body.approvalUrl ? `${message}\n승인 링크: ${body.approvalUrl}` : message);
+    err.code = body.code;
+    err.uncertain = body.uncertain === true;
+    err.status = res.status;
+    throw err;
   }
   return res.json();
+}
+
+/** The alert for a write that did not finish: unknown outcomes say so and point at the phone. */
+function writeErrorText(label, error, outcome) {
+  if (outcome === 'uncertain') return `${label} 결과 불명 (${error.code || '알 수 없음'})\n${UNCERTAIN_NOTE}`;
+  return `${label} 실패: ${error.message}`;
+}
+
+// One requestId per action, reused after an unknown outcome (see write-intents.js).
+const writeIntents = new KakaoWrites.WriteIntents();
+const UNCERTAIN_NOTE = '결과를 알 수 없습니다(연결 끊김·시간 초과 등). 실제로 처리됐는지 휴대폰 카카오톡에서 먼저 확인하세요. ' +
+  '같은 작업을 다시 시도하면 새 요청이 아니라 같은 요청으로 확인하므로 두 번 실행되지 않습니다.';
+
+/** POST one write with the requestId kept for this exact action; returns { result } or { error, outcome }. */
+async function postWrite(path, kind, args) {
+  const key = KakaoWrites.intentKey(kind, args);
+  const requestId = writeIntents.idFor(key);
+  try {
+    const result = await api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...args, requestId }) });
+    writeIntents.settle(key);
+    return { result, outcome: 'done' };
+  } catch (error) {
+    return { error, outcome: writeIntents.settle(key, error) };
+  }
 }
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -303,6 +340,7 @@ function switchTab(tabName) {
   if (tabName === 'friends') {
     renderFriends();
   }
+  if (tabName === 'settings') void loadControlPanel();
 }
 
 function setConn(connected, err) {
@@ -788,6 +826,12 @@ function clearUnreadUpTo(targetLogId, sendAt) {
   });
 }
 
+// Rendering state for date dividers and author grouping. Declared here so the first message
+// appended before any history loaded (e.g. a closed room) does not throw.
+let lastRenderedDate = null;
+let lastRenderedAuthor = null;
+let lastRenderedTimestamp = 0;
+
 function renderMessages(msgs) {
   const box = $('messages');
   box.innerHTML = '';
@@ -992,17 +1036,28 @@ async function sendMessage() {
   const row = appendMessageElement(optimistic, $('messages'));
   $('messages').scrollTop = $('messages').scrollHeight;
 
+  const sendArgs = {
+    chatId: activeChatId,
+    text: sendText,
+    ...(replyPayload ? { reply: replyPayload } : {}),
+    ...(mentionSpans.length ? { mentions: mentionSpans } : {})
+  };
   try {
-    const res = await api('/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chatId: activeChatId,
-        text: sendText,
-        ...(replyPayload ? { reply: replyPayload } : {}),
-        ...(mentionSpans.length ? { mentions: mentionSpans } : {})
-      })
-    });
+    await deliverSend(sendArgs, optimistic, row, input);
+  } finally {
+    isSending = false;
+  }
+}
+
+/**
+ * One send attempt for a bubble. The requestId belongs to this exact message (room + text + reply +
+ * mentions), so "다시 확인" and typing the same message again both reuse it while the outcome is unknown.
+ */
+async function deliverSend(sendArgs, optimistic, row, input) {
+  row?.querySelector('.send-uncertain')?.remove();
+  const { result: res, error: err, outcome } = await postWrite('/api/send', 'send', sendArgs);
+  if (outcome === 'done') {
+    row?.classList.remove('uncertain');
     if (res && (res.logId || res.messageId)) {
       const id = String(res.logId || res.messageId);
       optimistic.logId = id;
@@ -1010,27 +1065,53 @@ async function sendMessage() {
       if (res.unreadCount != null) optimistic.unreadCount = res.unreadCount;
       if (row) row.dataset.msgId = id;
     }
-  } catch (err) {
-    // Not sent: drop the optimistic bubble and give the text back so it can be retried.
-    currentMessages.splice(currentMessages.indexOf(optimistic), 1);
-    row?.remove();
-    if (!input.value) input.value = sendText;
-    alert(`전송 실패: ${err.message}`);
-  } finally {
-    isSending = false;
+    return;
   }
+  if (outcome === 'uncertain') {
+    // Maybe sent: keep the bubble, say so, and never offer a fresh send.
+    row?.classList.add('uncertain');
+    if (row) row.appendChild(uncertainSendNote(sendArgs, optimistic, row, input, err));
+    return;
+  }
+  // Not sent: drop the optimistic bubble and give the text back. After APPROVAL_REQUIRED the same
+  // text keeps its requestId, so sending it again after approving continues the same request.
+  const i = currentMessages.indexOf(optimistic);
+  if (i !== -1) currentMessages.splice(i, 1);
+  row?.remove();
+  if (input && !input.value && sendArgs.chatId === activeChatId) input.value = sendArgs.text;
+  alert(`전송 실패: ${err.message}`);
+}
+
+function uncertainSendNote(sendArgs, optimistic, row, input, err) {
+  const note = document.createElement('div');
+  note.className = 'send-uncertain';
+  const text = document.createElement('span');
+  text.textContent = `⚠ 전송 결과 불명 (${err.code || '알 수 없음'}): 보내졌는지 휴대폰에서 확인하세요.`;
+  text.title = UNCERTAIN_NOTE;
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.textContent = '같은 요청으로 다시 확인';
+  retry.title = '새로 보내지 않습니다. 같은 requestId로 데몬에 다시 물어 이미 보냈다면 그 결과를 돌려받습니다.';
+  retry.addEventListener('click', () => {
+    retry.disabled = true;
+    void deliverSend(sendArgs, optimistic, row, input);
+  });
+  const hide = document.createElement('button');
+  hide.type = 'button';
+  hide.textContent = '숨기기';
+  hide.title = '이 화면에서만 지웁니다. 같은 메시지를 다시 입력하면 여전히 같은 요청으로 확인합니다.';
+  hide.addEventListener('click', () => {
+    const i = currentMessages.indexOf(optimistic);
+    if (i !== -1) currentMessages.splice(i, 1);
+    row.remove();
+  });
+  note.append(text, retry, hide);
+  return note;
 }
 
 async function markRead(chatId, watermark) {
-  try {
-    await api('/api/read', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chatId, watermark })
-    });
-  } catch {
-    /* ignore */
-  }
+  // Read receipts need the daemon's separate approval; a failure is not shown here.
+  await postWrite('/api/read', 'mark_read', { chatId, watermark });
 }
 
 // ----------------------------------------------------------------------------
@@ -1396,20 +1477,11 @@ function initContextMenu() {
       return;
     }
     if (!confirm('이 메시지를 모든 대화상대에게서 삭제할까요? (약 5분 이내만 가능, 되돌릴 수 없음)')) return;
-    try {
-      const r = await api('/api/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chatId: activeChatId, logId: String(logId) })
-      });
-      if (r && r.status === 0) {
-        removeMessageBubble(String(logId));
-      } else {
-        alert(`삭제 실패: status ${r?.status ?? '?'} ${r?.error ?? ''}`);
-      }
-    } catch (e) {
-      alert(`삭제 요청 오류: ${e.message}`);
-    }
+    const { result: r, error, outcome } = await postWrite('/api/delete', 'delete', { chatId: activeChatId, logId: String(logId) });
+    if (outcome === 'done') {
+      if (r && r.status === 0) removeMessageBubble(String(logId));
+      else alert(`삭제 실패: status ${r?.status ?? '?'} ${r?.error ?? ''}`);
+    } else alert(writeErrorText('삭제', error, outcome));
   });
 }
 
@@ -1466,20 +1538,11 @@ async function leaveChat(chatId) {
   const c = chats.find((x) => x.id === chatId);
   const name = c ? titleOf(c) : chatId;
   if (!confirm(`'${name}' 채팅방을 나가시겠습니까? 되돌릴 수 없습니다.`)) return;
-  try {
-    const r = await api('/api/leave', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chatId })
-    });
-    if (r && r.status === 0) {
-      removeChatFromList(chatId);
-    } else {
-      alert(`나가기 실패: status ${r?.status ?? '?'} ${r?.error ?? ''}`);
-    }
-  } catch (e) {
-    alert(`나가기 요청 오류: ${e.message}`);
-  }
+  const { result: r, error, outcome } = await postWrite('/api/leave', 'leave', { chatId });
+  if (outcome === 'done') {
+    if (r && r.status === 0) removeChatFromList(chatId);
+    else alert(`나가기 실패: status ${r?.status ?? '?'} ${r?.error ?? ''}`);
+  } else alert(writeErrorText('나가기', error, outcome));
 }
 
 function removeChatFromList(chatId) {
@@ -1544,17 +1607,11 @@ async function doForward(targetChatId) {
     alert('전달할 내용이 없습니다.');
     return;
   }
-  try {
-    const r = await api('/api/forward', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chatId: targetChatId, text, type: m.type || 1, extra: m.extra || '' })
-    });
-    $('forwardModal').classList.add('hidden');
+  const { result: r, error, outcome } = await postWrite('/api/forward', 'forward', { chatId: targetChatId, text, type: m.type || 1, extra: m.extra || '' });
+  $('forwardModal').classList.add('hidden');
+  if (outcome === 'done') {
     if (!r || r.status !== 0) alert(`전달 실패: status ${r?.status ?? '?'} ${r?.error ?? ''}`);
-  } catch (e) {
-    alert(`전달 오류: ${e.message}`);
-  }
+  } else alert(writeErrorText('전달', error, outcome));
 }
 function initForwardModal() {
   $('forwardClose').addEventListener('click', () => $('forwardModal').classList.add('hidden'));
@@ -1719,12 +1776,14 @@ function showNextApproval() {
 function addApproval(d) {
   if (!d || typeof d.id !== 'string' || approvalQueue.some((x) => x.id === d.id)) return;
   approvalQueue.push(d);
+  updateApprovalCount();
   if (approvalQueue.length === 1) showNextApproval(); else $('approvalQueue').textContent = `대기 ${approvalQueue.length}건`;
 }
 
 function removeApproval(id) {
   const wasFirst = approvalQueue[0]?.id === id;
   approvalQueue = approvalQueue.filter((x) => x.id !== id);
+  updateApprovalCount();
   if (wasFirst) showNextApproval(); else if (approvalQueue.length) $('approvalQueue').textContent = approvalQueue.length > 1 ? `대기 ${approvalQueue.length}건` : '';
 }
 
@@ -1750,6 +1809,129 @@ async function answerApproval(action) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// Control panel (설정 탭 · 에이전트 제어): status, pause, permissions, pending approvals.
+// Display and narrowing only: the agent mode is not changeable here, and releasing a
+// pause goes through the daemon's own approval dialog with a code the person types.
+// ----------------------------------------------------------------------------
+const MODE_LABEL = { ask: '묻기 (ask)', trust: '신뢰 (trust)' };
+const PERM_KIND = { send: '전송', 'read-rule': '읽기', 'read-grant': '읽기 1회' };
+
+function controlNote(text) {
+  $('ctlNote').textContent = text || '';
+}
+
+function updateApprovalCount() {
+  const n = approvalQueue.length;
+  $('ctlApprovals').textContent = `${n}건`;
+  $('ctlApprovalsOpen').classList.toggle('hidden', n === 0);
+}
+
+function roomLabel(chatId) {
+  const c = chats.find((x) => x.id === chatId);
+  return c ? titleOf(c) : `방 …${String(chatId).slice(-6)}`;
+}
+
+async function loadControlPanel() {
+  let r;
+  try {
+    r = await api('/api/control');
+  } catch (e) {
+    controlNote(`불러오지 못했습니다: ${e.message}`);
+    return;
+  }
+  const s = r.status || {};
+  const conn = $('ctlConn');
+  const ok = s.connected && s.accountConnected !== false;
+  conn.textContent = !s.connected ? '데몬 연결 끊김' : s.accountConnected === false ? '계정 재연결 중' : '정상';
+  conn.className = 'status-pill ' + (ok ? 'green' : '');
+  $('ctlMode').textContent = s.agentMode ? MODE_LABEL[s.agentMode.mode] || s.agentMode.mode : '—';
+  $('ctlMode').title = '운영자가 설정 파일 또는 npm run setup -- --mode로 정합니다.';
+  const paused = s.paused;
+  $('ctlPaused').textContent = paused == null ? '—' : paused ? '일시정지됨' : '동작 중';
+  $('ctlPaused').className = 'status-pill ' + (paused === false ? 'green' : '');
+  $('ctlPause').classList.toggle('hidden', paused !== false);
+  $('ctlResume').classList.toggle('hidden', paused !== true);
+  for (const id of ['ctlPause', 'ctlResume']) $(id).disabled = !s.connected;
+  renderPermissions(r.permissions || []);
+  (r.approvals || []).forEach(addApproval);
+  updateApprovalCount();
+}
+
+function renderPermissions(items) {
+  const list = $('ctlPermissions');
+  list.innerHTML = '';
+  if (!items.length) {
+    const li = document.createElement('li');
+    li.className = 'perm-empty';
+    li.textContent = '허용한 권한이 없습니다.';
+    list.appendChild(li);
+    return;
+  }
+  for (const p of items) {
+    const li = document.createElement('li');
+    li.className = 'perm-item';
+    const kind = document.createElement('span');
+    kind.className = 'perm-kind';
+    kind.textContent = PERM_KIND[p.kind] || p.kind;
+    const body = document.createElement('span');
+    body.className = 'perm-body';
+    // Room titles are untrusted text: textContent only.
+    const room = document.createElement('strong');
+    room.textContent = roomLabel(p.chatId);
+    const detail = document.createElement('small');
+    detail.textContent = p.detail;
+    body.append(room, detail);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mini-btn';
+    btn.textContent = '철회';
+    btn.addEventListener('click', () => void revokePermission(p, btn));
+    li.append(kind, body, btn);
+    list.appendChild(li);
+  }
+}
+
+async function revokePermission(p, btn) {
+  if (!confirm(`'${roomLabel(p.chatId)}'의 ${PERM_KIND[p.kind] || ''} 권한을 철회할까요?\n즉시 적용되며, 다시 허용하려면 승인이 필요합니다.`)) return;
+  btn.disabled = true;
+  try {
+    const r = await api('/api/control/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ permissionId: p.permissionId }) });
+    controlNote(r.revoked ? '철회했습니다.' : '이미 철회된 권한입니다.');
+  } catch (e) {
+    controlNote(`철회 실패: ${e.message}`);
+  }
+  await loadControlPanel();
+}
+
+async function pauseAgent() {
+  $('ctlPause').disabled = true;
+  try {
+    await api('/api/control/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: true }) });
+    controlNote('일시정지했습니다. 에이전트의 전송과 계정 변경이 멈춥니다.');
+  } catch (e) {
+    controlNote(`일시정지 실패: ${e.message}`);
+  }
+  await loadControlPanel();
+}
+
+async function resumeAgent() {
+  $('ctlResume').disabled = true;
+  controlNote('해제 승인을 요청했습니다. 승인 창에 표시된 확인 코드를 직접 입력하세요.');
+  const { result, error, outcome } = await postWrite('/api/control/resume', 'resume', {});
+  if (outcome === 'done') controlNote(result?.paused === false ? '일시정지를 해제했습니다.' : '아직 일시정지 상태입니다.');
+  else if (outcome === 'uncertain') controlNote(`해제 결과 불명 (${error.code || '알 수 없음'}). 새로고침으로 상태를 확인하세요. 다시 요청하면 같은 요청으로 확인합니다.`);
+  else controlNote(error.code === 'POLICY_DENIED' ? '해제를 거절했습니다. 일시정지 상태가 유지됩니다.' : `해제되지 않았습니다: ${error.message}`);
+  await loadControlPanel();
+}
+
+function initControlPanel() {
+  $('ctlPause').addEventListener('click', () => void pauseAgent());
+  $('ctlResume').addEventListener('click', () => void resumeAgent());
+  $('ctlRefresh').addEventListener('click', () => void loadControlPanel());
+  $('ctlApprovalsOpen').addEventListener('click', () => showNextApproval());
+}
+
 function initApprovals() {
   $('approvalForm').addEventListener('submit', (e) => { e.preventDefault(); void answerApproval('accept'); });
   $('approvalDecline').addEventListener('click', () => void answerApproval('decline'));
@@ -1767,6 +1949,7 @@ function connectSSE() {
   es.addEventListener('status', (ev) => {
     const d = JSON.parse(ev.data);
     setConn(d.connected, d.error);
+    if (activeTab === 'settings') void loadControlPanel();
     if (d.chats && d.chats.length > 0) {
       chats = d.chats;
       sortChats();
@@ -1777,6 +1960,9 @@ function connectSSE() {
 
   es.addEventListener('approval-request', (ev) => addApproval(JSON.parse(ev.data)));
   es.addEventListener('approval-closed', (ev) => removeApproval(JSON.parse(ev.data).id));
+  es.addEventListener('control-changed', () => {
+    if (activeTab === 'settings') void loadControlPanel();
+  });
 
   es.addEventListener('chat-meta', (ev) => {
     const d = JSON.parse(ev.data);
@@ -2225,6 +2411,7 @@ async function init() {
 
   initMessagesScroll();
   initApprovals();
+  initControlPanel();
   connectSSE();
 }
 

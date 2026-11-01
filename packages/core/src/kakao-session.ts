@@ -134,7 +134,7 @@ export class KakaoSession {
       log: (l) => this.log(l)
     });
 
-    this.session.on('connected', (info: { endpoint: { host: string; port: number }; loginList: any }) => {
+    this.onSession('connected', (info: { endpoint: { host: string; port: number }; loginList: any }) => {
       this.connected = true;
       this.endpoint = info.endpoint;
       const { fromLoginList, remembered } = this.chats.loadLoginList(info.loginList.conversations);
@@ -150,29 +150,29 @@ export class KakaoSession {
         try { listener(); } catch (e) { this.log(`connected listener failed: ${toKakaoError(e).code}`); }
       }
     });
-    this.session.on('reconnecting', (i: { attempt: number; delayMs: number }) => {
+    this.onSession('reconnecting', (i: { attempt: number; delayMs: number }) => {
       this.connected = false;
       this.readAccessChanged();
       this.log(`reconnecting (attempt ${i.attempt}, in ${i.delayMs}ms)`);
     });
-    this.session.on('refreshed', () => this.log('credentials refreshed; reconnecting with new token'));
-    this.session.on('message', (m: IncomingMessage) => this.ingest(m));
-    this.session.on('read', (r: ReadReceipt) => {
+    this.onSession('refreshed', () => this.log('credentials refreshed; reconnecting with new token'));
+    this.onSession('message', (m: IncomingMessage) => this.ingest(m));
+    this.onSession('read', (r: ReadReceipt) => {
       this.log('read receipt received');
       if (r.chatId && r.watermark) {
         this.noteReaderWatermark(String(r.chatId), r.userId ? String(r.userId) : '', String(r.watermark));
       }
       this.feed.pushReadReceipt(r);
     });
-    this.session.on('error', (e: Error) => this.log(`session error: ${toKakaoError(e).code}`));
+    this.onSession('error', (e: Error) => this.log(`session error: ${toKakaoError(e).code}`));
     // Pushes not yet seen live. Logged so a live test can see whether they arrive.
-    this.session.on('syncmodmsg', (m: { chatLog?: IncomingMessage }) =>
+    this.onSession('syncmodmsg', (m: { chatLog?: IncomingMessage }) =>
       this.log('message modification received')
     );
     // "Delete for everyone" done on another device (✅ 2026-10-20, phone in a 1:1). The push's chatLog
     // is not the deleted message but a type 0 feed notice whose text is
     // {"logId": <deleted>, "byHost", "hidden", "feedType": 14}; the server sets 0x4000 on the target.
-    this.session.on('syncdlmsg', (m: { chatLog?: IncomingMessage }) => {
+    this.onSession('syncdlmsg', (m: { chatLog?: IncomingMessage }) => {
       const notice = m.chatLog;
       const target = deletedLogIdOf(notice);
       this.log('message deletion received');
@@ -183,7 +183,7 @@ export class KakaoSession {
     });
     // Every unsolicited packet except the two handled above, whatever its packet id: the server's
     // way of telling this device about the user's own phone activity is still unknown.
-    this.session.on('packet', (pkt: LocoPacket) => {
+    this.onSession('packet', (pkt: LocoPacket) => {
       if (pkt.header.method !== 'MSG' && pkt.header.method !== 'DECUNREAD') {
         const d = (pkt.data || {}) as Record<string, unknown>;
         // SYNCACTION {userId, chatId, type, logId} is a
@@ -331,7 +331,7 @@ export class KakaoSession {
   getRoomAccess(chatId: string) {
     const trust = this.config.agentMode === 'trust';
     return { chatId, rule: this.roomAccess.rule(chatId), defaultMode: trust || this.isMemoChat(chatId) ? 'immediate' as const : 'deny' as const,
-      unreadRestriction: trust ? 'none' as const : 'confirmed-read-only' as const, readReceipts: trust ? 'agent-mode-trust' as const : 'separate-approval' as const };
+      readReceipts: trust ? 'agent-mode-trust' as const : 'separate-approval' as const };
   }
 
   setRoomAccess(chatId: string, rule: unknown) {
@@ -390,14 +390,9 @@ export class KakaoSession {
   /** A single operation owns its budget; rechecks never grant another operation. */
   private async beginContentRead(chatId: string, approval: ReadApproval = {}, count = 1): Promise<() => void> {
     if (this.roomAccess.rule(chatId).unreadPreviewAfterLogId !== undefined) throw new KakaoError('POLICY_DENIED', 'Preview-only approval does not authorize ordinary history, search, polling or media');
+    this.requireConnected();
     this.roomAccess.take(chatId, approval, count);
-    await this.requireReadRoom(chatId);
-    const check = () => {
-      this.roomAccess.check(chatId, approval, count);
-      this.assertRoomStillRead(chatId);
-    };
-    check();
-    return check;
+    return () => this.roomAccess.check(chatId, approval, count);
   }
 
   /** Expiring operator-approved LOCAL preview. No message fetch, room entry or NOTIREAD. */
@@ -688,7 +683,7 @@ export class KakaoSession {
     const liveCursor = this.feed.cursor;
     const limit = opts.limit ?? 50;
     const check = await this.beginContentRead(chatId, opts, limit);
-    return { ...await this.loadHistory(chatId, opts, limit, check, async () => { check(); await this.requireReadRoom(chatId); check(); }), liveCursor };
+    return { ...await this.loadHistory(chatId, opts, limit, check, async () => { this.requireConnected(); check(); }), liveCursor };
   }
 
   /** Date range retrieval scans bounded provider pages, then pages the local union.
@@ -701,7 +696,7 @@ export class KakaoSession {
     let sync: Record<string, unknown> = { mode: 'local', truncated: state.truncated };
     if (state.phase === 'sync') {
       const result = await this.loadHistory(chatId, { cur: state.since, max: state.max }, range.limit, check,
-        async () => { check(); await this.requireReadRoom(chatId); check(); });
+        async () => { this.requireConnected(); check(); });
       if (result.sync.error) throw new KakaoError('NETWORK', 'History page could not be fetched; no range result returned');
       if (result.sync.status !== undefined && result.sync.status !== 0 && result.sync.status !== -203) {
         throw locoStatusError('MCHATLOGS', result.sync.status);
@@ -925,10 +920,10 @@ export class KakaoSession {
   private assertMessageWatch(chatId: string): void {
     this.requireConnected();
     if (!this.chats.get(chatId)) throw new KakaoError('NOT_FOUND', 'Room is no longer available');
-    this.roomAccess.check(chatId); this.assertRoomStillRead(chatId);
+    this.roomAccess.check(chatId);
   }
   async authorizeMessageWatch(chatId: string): Promise<void> {
-    this.assertMessageWatch(chatId); await this.requireReadRoom(chatId); this.assertMessageWatch(chatId);
+    this.assertMessageWatch(chatId);
   }
 
   private readAccessChanged(chatId?: string): void {
@@ -968,9 +963,8 @@ export class KakaoSession {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 120000) throw new KakaoError('INVALID_ARGUMENT', 'Invalid message wait timeout');
     const check = await this.beginContentRead(chatId, approval);
     const result = await this.feed.wait(sinceSeq, timeoutMs, chatId);
-    // A newly received message makes the room unread: never expose it merely
-    // because the wait started while the room was read. No second budget slot.
-    await this.requireReadRoom(chatId);
+    // The rule may have narrowed while waiting. No second budget slot.
+    this.requireConnected();
     check();
     return this.withoutHiddenOrDeleted(result).slice(0, this.roomAccess.rule(chatId).maxMessages ?? 50).map(m => this.named(m));
   }
@@ -1196,22 +1190,6 @@ export class KakaoSession {
 
   // -- internals -------------------------------------------------------------
 
-  /**
-   * In ask mode, content is accessible only in an explicitly read room. trust lifts this: the operator chose
-   * to let the AI read rooms with unread messages. Reading never changes read state in either mode.
-   */
-  private readStateRestricted(): boolean { return this.config.agentMode !== 'trust'; }
-
-  /** Content is accessible only in an explicitly read room (ask mode). Never changes read state. */
-  private assertRoomStillRead(chatId: string): void {
-    if (!this.readStateRestricted()) return;
-    const count = this.chats.get(chatId)?.unreadCount;
-    if (count !== 0) {
-      throw new KakaoError('ROOM_NOT_READ', 'Content access requires a confirmed already-read room; unread or unknown rooms are blocked',
-        { details: { reason: Number.isSafeInteger(count) && count! > 0 ? 'local_unread' : 'unread_unknown' } });
-    }
-  }
-
   /** Metadata only. Never interprets a local read-receipt ACK as authoritative unread0. */
   async inspectRoomReadState(chatId: string) {
     this.requireConnected();
@@ -1272,17 +1250,6 @@ export class KakaoSession {
       serverUnreadCount: known ? count! : null, ...(source ? { source, verification } : {}) };
   }
 
-  private async requireReadRoom(chatId: string): Promise<void> {
-    this.requireConnected();
-    if (!this.readStateRestricted()) return;
-    this.assertRoomStillRead(chatId);
-    const state = await this.inspectRoomReadState(chatId);
-    if (!state.confirmed) throw new KakaoError('ROOM_NOT_READ',
-      'Server unread state is not confirmed zero; read-receipt acknowledgement alone is insufficient',
-      { details: { ...state, nextAction: 'Open this exact room in the official app, then refresh unread metadata; do not repeat mark_read automatically' } });
-    this.assertRoomStillRead(chatId);
-  }
-
   /** Human account media: resolve only visible stored originals, never caller URLs. */
   async getUserMedia(chatId: string, messageId: string) {
     this.requireConnected();
@@ -1320,11 +1287,11 @@ export class KakaoSession {
     return {
       config: this.config, db: this.db, store: this.store,
       credentials: () => this.creds.get(),
-      /** Room rule, budget and read state before content work; returns the re-check to run after it. */
+      /** Room rule and budget before content work; returns the re-check to run after it. */
       beginContentRead: (chatId: string, approval: ReadApproval = {}, count = 1) => this.beginContentRead(chatId, approval, count),
       /** The same checks without spending budget, for re-checks right before a local commit. */
       checkContentRead: (chatId: string, approval: ReadApproval = {}, count = 1) => {
-        this.roomAccess.check(chatId, approval, count); this.assertRoomStillRead(chatId);
+        this.roomAccess.check(chatId, approval, count);
       },
       knownChatIds: () => this.chats.list().map(chat => chat.id),
       getChatInfo: (chatId: string) => this.getChatInfo(chatId),
@@ -1620,6 +1587,21 @@ export class KakaoSession {
 
   private withAuthorName(chatId: string, m: IncomingMessage): IncomingMessage & { authorName?: string } {
     return { ...m, authorName: this.chats.authorName(chatId, m.authorId) };
+  }
+
+  /**
+   * Subscribe to a LOCO session event. These handlers run inside the socket reader, so a failure
+   * (a storage error, a history conflict, an id that is not canonical) is logged by its error code
+   * only and never reaches the connection or the process.
+   */
+  private onSession<A extends unknown[]>(event: string, handler: (...args: A) => void): void {
+    this.session.on(event, (...args: unknown[]) => {
+      try {
+        handler(...(args as A));
+      } catch (e) {
+        this.log(`${event} event handling failed: ${toKakaoError(e).code}`);
+      }
+    });
   }
 
   private log(line: string): void {

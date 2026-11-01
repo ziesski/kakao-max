@@ -29,7 +29,12 @@
 - 서비스는 `node dist/mcp.mjs`로 시작합니다. 시작 전과 갱신 때마다 복사본 digest를 다시 확인하고, 다르면 계정 작업 없이 멈춥니다.
 - 갱신: 전역 패키지를 새 버전으로 올린 뒤 서버에서 `kakao-max setup --update`. 데몬을 멈추고 파일을 바꾸고
   `.env.local`과 데이터는 그대로 둔 채 같은 계정으로 연결됐는지 확인합니다. 같은 버전이면 재시작하지 않습니다.
-- 복구: `kakao-max setup --repair`.
+- 갱신 실패: 데몬을 멈추기 전에 현재 release 파일의 검증된 복사본을 `/var/lib/kakao-max/rollback/`에 만들고, 멈춘 뒤
+  `install-state.json`에 시도 중인 digest(`pendingUpdate`)를 기록합니다. 새 파일 복사·digest 확인이 실패하면 복사본으로 이전
+  release를 되돌리고 digest를 확인한 뒤 같은 서비스를 한 번 시작해 같은 계정 연결을 확인합니다. manifest는 이전 release로 남습니다.
+  복원까지 실패하면 서비스는 멈춘 채로 두고, 일반 `--update`는 아무것도 멈추지 않고 거부하며 `kakao-max setup --repair`를 안내합니다.
+- 복구: `kakao-max setup --repair`. 실패한 갱신이 남긴 상태(일부만 복사된 app, `pendingUpdate`)도 받아들여 현재 패키지
+  release를 설치하고, 다시 실패하면 남아 있는 복사본으로 이전 release를 복원합니다.
 - 소스 체크아웃으로 설치한 서버(version 1, Git 커밋 고정)는 패키지로 갱신하지 않습니다. 반대도 마찬가지입니다.
 
 검증 범위: 주입한 호스트로 설치·변조 감지·갱신·같은 버전 무시를 단위 확인했습니다🟡. `install-check` 워크플로가 릴리스마다

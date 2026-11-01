@@ -66,7 +66,7 @@
 
 | 항목 | ask (기본) | trust |
 |---|---|---|
-| 방 내용 읽기 | 방 규칙이 없으면 `deny`. 방마다 허가 또는 읽기 허가. 안 읽은 메시지가 있는 방은 읽지 못함(`ROOM_NOT_READ`) | 규칙이 없는 방도, 안 읽은 메시지가 있는 방도 읽기 허용. 명시한 `deny`는 지킨다 |
+| 방 내용 읽기 | 방 규칙이 없으면 `deny`. 방마다 허가 또는 읽기 허가. 허가한 방은 안 읽은 메시지가 있어도 읽는다 | 규칙이 없는 방도, 안 읽은 메시지가 있는 방도 읽기 허용. 명시한 `deny`는 지킨다 |
 | 읽음 표시 | 사람 승인 | 바로 |
 | 텍스트·사진 전송 | 방마다 처음 한 번 승인, 이후 바로 | 바로 |
 | 무승인 전송 하루 한도 | `KAKAO_RECIPIENT_DAILY_LIMIT` 기본 50 | 없음(속도 제한만) |
@@ -206,8 +206,9 @@ AI가 설치를 대신할 때도 이 문장을 바꾸지 않고 이용자에게 
 6. 계정 로그인 단계를 터미널 입력으로만 받을지, 로컬 브라우저 페이지(loopback, 일회용 링크)도 둘지.
    AI가 설치를 맡은 경우 이용자가 터미널을 직접 여는 것이 번거로울 수 있다
 7. ~~이미 읽은 방 제한을 trust에서도 유지할지~~ **해결(사용자 결정, 2026-10-25): trust에서는 푼다, ask는 그대로.**
-   `unreadRestriction`이 trust에서 `none`이 되어 안 읽은 메시지가 있는 방도 읽는다. 읽기는 두 모드 모두 읽음 표시를 보내지 않는다.
-   안 읽은 메시지 미리보기 전용 승인(`preview_unread`)의 별도 검사는 바꾸지 않았다
+   **변경(사용자 결정, 2026-10-31): ask에서도 푼다.** ask의 내용 읽기는 이미 방마다 사람의 허가가 필요하므로,
+   허가한 방에 안 읽은 메시지가 있다는 이유로 다시 막으면 "대신 답장" 같은 기본 사용 장면이 동작하지 않았다.
+   읽기는 두 모드 모두 읽음 표시를 보내지 않는다. 안 읽은 메시지 미리보기 전용 승인(`preview_unread`)의 별도 검사는 바꾸지 않았다
 8. (구현 중 발견) 방 만들기(`create_direct_chat`)는 §4 표에 없어서 trust에서도 매번 승인으로 두었다.
    전달(`forward_message`)과 이모티콘은 "텍스트·사진 전송"과 같은 쓰기로 보고 trust에서 바로 보낸다
 
@@ -231,17 +232,19 @@ AI가 설치를 대신할 때도 이 문장을 바꾸지 않고 이용자에게 
 - `loadConfig()`: `KAKAO_AGENT_MODE`(없으면 `ask`, 알 수 없는 값 `CONFIG_INVALID`), `agentModeSource`, 모드별 하루 한도
   (`ask` 50, `trust` 없음, 명시값 우선), `KAKAO_AUTOMATION_MAX_TIER`(0~3, 기본 1/3), `ask`에서 `KAKAO_VAULT_AUTO_SAVE`는 `CONFIG_INVALID`.
 - 방 읽기: `RoomAccessPolicy`가 규칙 없는 방을 `trust`에서 `immediate`로 본다. 명시한 `deny`와 만료 규칙(→ deny)은 그대로 이긴다.
-  방 메시지 상한과 읽기 예산도 그대로다. 이미 읽은 방 제한(`ROOM_NOT_READ`)은 trust에서 풀린다(결정 7).
+  방 메시지 상한과 읽기 예산도 그대로다. 이미 읽은 방 제한은 두 모드 모두 없다(결정 7).
 - 전송: `RecipientPermissions({ allRooms })`가 `trust`에서 모든 정확한 방 ID를 허가로 본다(`trust:<chatId>`, 목록에는 안 나옴).
   방 상한·pause·속도 제한은 `SendPolicy`에서 그대로 적용된다.
 - 계정 변경: 쓰기 엔진의 `modeApproves`가 `TRUST_APPROVED_ACTIONS`(`agent-mode.ts`)만 승인 없이 실행한다.
   pause 해제, 방 읽기·전송 허가, 읽기 grant, 방 만들기, 톡클라우드는 두 모드 모두 사람 승인이다.
 - `get_status`의 `agentMode`·`roomContentDefault`, 모드별 서버 instructions(`apps/mcp/src/instructions.ts`).
 - 운영자 명령 `npm run setup -- --mode ask|trust [--accept-risk] [--env 경로]`: `--accept-risk` 없는 trust는 §5 문장만 출력하고 멈춘다.
-  자동 저장이 켜진 상태에서 `ask`로 바꾸는 것은 거절한다. 적용하려면 데몬을 다시 시작해야 한다.
+  자동 저장이 켜진 상태에서 `ask`로 바꾸는 것은 거절한다. 관리형 설치가 있는 서버에서는 `--env` 없이도 서비스의 설정 파일에
+  sudo로 저장하고, 사람이 확인하면 서비스를 다시 시작한다(실행 중 일시정지는 풀린다는 안내와 함께).
+- 설치(bootstrap) 흐름이 로그인 성공 뒤 모드를 묻는다(2026-10-31). Enter는 `ask`, `trust`는 §5 문장을 보여 주고 다시 확인한다.
 - 공개용 `AGENTS.md`에 모드 규칙을 더했다.
 
-아직 안 됨: 설치(bootstrap) 흐름 안의 모드 질문, `--json` 출력과 `humanRequired` 표시, 설치 기록(선택 시각·방법),
+아직 안 됨: `--json` 출력과 `humanRequired` 표시, 설치 기록(선택 시각·방법),
 AI 설치자 안내문(§8), 결정 2·3·8. 자동 작업은 아직 없으므로 `automationMaxTier`는 설정값으로만 존재한다.
 
 ## 11. 검증 범위

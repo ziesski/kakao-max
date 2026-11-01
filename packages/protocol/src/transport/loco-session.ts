@@ -37,6 +37,13 @@ export interface LocoSessionOptions {
   os?: string;
   /** Send a LOCO PING every N ms to keep the carriage connection alive (0 = disabled). */
   pingIntervalMs?: number;
+  /**
+   * Consecutive failed PINGs after which the link is treated as dead and the socket is dropped,
+   * so the reconnect path runs instead of waiting for TCP to give up (default 2; 0 = never).
+   */
+  maxMissedPings?: number;
+  /** TCP keepalive initial delay in ms once connected (default 30000; 0 = disabled). */
+  tcpKeepAliveMs?: number;
   /** Per-request response timeout. */
   requestTimeoutMs?: number;
   /**
@@ -270,11 +277,14 @@ export class LocoSession extends EventEmitter {
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private pingTimer?: NodeJS.Timeout;
+  private missedPings = 0;
   private closed = false;
 
   private readonly appVersion: string;
   private readonly os: string;
   private readonly pingIntervalMs: number;
+  private readonly maxMissedPings: number;
+  private readonly tcpKeepAliveMs: number;
   private readonly requestTimeoutMs: number;
   private readonly connectTimeoutMs: number;
   private readonly onFrame?: (frame: LocoFrame) => void;
@@ -284,6 +294,8 @@ export class LocoSession extends EventEmitter {
     this.appVersion = opts.appVersion ?? '26.4.0';
     this.os = opts.os ?? 'mac';
     this.pingIntervalMs = opts.pingIntervalMs ?? 0;
+    this.maxMissedPings = opts.maxMissedPings ?? 2;
+    this.tcpKeepAliveMs = opts.tcpKeepAliveMs ?? 30000;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 15000;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 8000;
     this.onFrame = opts.onFrame;
@@ -312,6 +324,7 @@ export class LocoSession extends EventEmitter {
     return new Promise((resolve, reject) => {
       // Short idle timeout during connect/login = fast-fail on an unreachable allocation.
       const socket = net.connect({ host: chatHost, port: chatPort, timeout: this.connectTimeoutMs }, () => {
+        if (this.tcpKeepAliveMs > 0) socket.setKeepAlive(true, this.tcpKeepAliveMs);
         const { handshakeBytes, aesKey } = createLocoV2Handshake();
         this.aesKey = aesKey;
         socket.write(Buffer.from(handshakeBytes));
@@ -349,14 +362,12 @@ export class LocoSession extends EventEmitter {
           .catch(reject);
 
         if (this.pingIntervalMs > 0) {
-          this.pingTimer = setInterval(() => {
-            this.request('PING', {}).catch(() => {});
-          }, this.pingIntervalMs);
+          this.pingTimer = setInterval(() => this.ping(), this.pingIntervalMs);
         }
       });
 
       socket.on('data', (chunk) => this.onData(chunk));
-      socket.on('error', (err) => { this.emit('error', err); if (this.pending.size === 0) reject(err); });
+      socket.on('error', (err) => { this.reportError(err); if (this.pending.size === 0) reject(err); });
       socket.on('timeout', () => socket.destroy(new LocoError('TIMEOUT', 'carriage socket timed out')));
       socket.on('close', () => this.handleClose());
       this.socket = socket;
@@ -922,7 +933,7 @@ export class LocoSession extends EventEmitter {
 
   /** Send a LOCO packet and resolve with the response that echoes its packetId. */
   request(method: string, body: Record<string, unknown>): Promise<LocoPacket> {
-    if (!this.socket || !this.aesKey) return Promise.reject(new LocoError('NOT_CONNECTED', 'session not connected'));
+    if (this.closed || !this.socket || !this.aesKey) return Promise.reject(new LocoError('NOT_CONNECTED', 'session not connected'));
     const id = this.nextId++;
     this.tap({ direction: 'out', id, method, status: 0, body });
     const frame = encryptLocoV2Frame(encodeLocoPacket(id, 0, method, body), this.aesKey);
@@ -943,6 +954,40 @@ export class LocoSession extends EventEmitter {
   /** Abruptly drop the underlying socket (no FIN) to simulate a network drop — for testing reconnect. */
   forceDrop(): void {
     this.socket?.destroy(new Error('forced drop (test)'));
+  }
+
+  /**
+   * One keepalive PING. A reply resets the miss count; `maxMissedPings` failures in a row mean the
+   * link is silently dead, so the session closes now (pending requests reject, later ones fail with
+   * NOT_CONNECTED) and the socket is dropped, instead of hanging until TCP gives up.
+   */
+  private ping(): void {
+    this.request('PING', {}).then(
+      () => { this.missedPings = 0; },
+      () => {
+        if (this.closed) return;
+        this.missedPings++;
+        if (this.maxMissedPings > 0 && this.missedPings >= this.maxMissedPings) {
+          const socket = this.socket;
+          this.handleClose();
+          socket?.destroy();
+        }
+      }
+    );
+  }
+
+  /**
+   * Report a session error to listeners. Until the session is wired (during connect and login) nobody
+   * listens, and an unheard 'error' would throw and end the process; the failure already reaches the
+   * caller through the connect promise or the request. A listener that throws is contained too.
+   */
+  private reportError(err: Error): void {
+    if (this.listenerCount('error') === 0) return;
+    try {
+      this.emit('error', err);
+    } catch {
+      // An 'error' listener that throws must not take the session down either.
+    }
   }
 
   /** True once the connection has closed (clean or dropped). */
@@ -967,10 +1012,16 @@ export class LocoSession extends EventEmitter {
       try {
         decoded = decodeLocoPacket(packetBytes);
       } catch (err) {
-        this.emit('error', err as Error);
+        this.reportError(err as Error);
         continue;
       }
-      this.dispatch(decoded);
+      // A listener that throws (e.g. a storage failure while recording a message) must neither
+      // crash the process nor strand the packets still buffered behind this one.
+      try {
+        this.dispatch(decoded);
+      } catch (err) {
+        this.reportError(err instanceof Error ? err : new Error(String(err)));
+      }
     }
   }
 
@@ -1677,7 +1728,17 @@ export class ResilientLocoSession extends EventEmitter {
     this._endpoint = opened.endpoint;
     this.attempt = 0;
     this.wire(opened.session);
-    this.emit('connected', { endpoint: opened.endpoint, loginList: opened.loginList });
+    // The session is live and wired: never reject past this point, or a reconnect loop would open a
+    // second connection on the same device key while this one keeps running.
+    try {
+      this.emit('connected', { endpoint: opened.endpoint, loginList: opened.loginList });
+    } catch (e) {
+      try {
+        if (this.listenerCount('error') > 0) this.emit('error', e instanceof Error ? e : new Error(String(e)));
+      } catch {
+        // ignored: see above
+      }
+    }
     return { loginList: opened.loginList };
   }
 

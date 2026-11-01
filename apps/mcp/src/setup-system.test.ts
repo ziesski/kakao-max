@@ -15,6 +15,7 @@ function fixture(t: { after(fn: () => void): void }) {
   const commands: Array<{ program: string; args: string[] }> = [], logs: string[] = [],
     registrations: Array<{ email: string; password: string; uuid: string; takeover: boolean }> = [];
   let sourceCommit = COMMIT, installedCommit = COMMIT, rememberLogin = false;
+  let modeAnswers: string[] = [];
   let answers = [EMAIL, PASSWORD, ''], statuses: number[] = [], user = false, started = false,
     occupied = false, unhealthy = false, failBuild = false, healthDelay = 0, waits = 0, dirty = false;
   const uid = process.getuid!() || 65000, gid = process.getgid!();
@@ -24,6 +25,7 @@ function fixture(t: { after(fn: () => void): void }) {
     log: s => logs.push(s), prompt: async (_q, secret) => {
       assert.ok(!_q.includes('PREPARE') && !_q.includes('LOGIN'), 'no redundant installation or login confirmation');
       if (_q.startsWith('자동 재로그인을 위해')) return rememberLogin ? 'y' : '';
+      if (_q.startsWith('에이전트 모드') || _q.includes('trust를 선택합니다')) return modeAnswers.shift() ?? '';
       const value = answers.shift() ?? '';
       if (value === PASSWORD) assert.equal(secret, true);
       return value;
@@ -57,7 +59,7 @@ function fixture(t: { after(fn: () => void): void }) {
   return { host, commands, logs, registrations, root, repo, parent,
     advance: () => { sourceCommit = 'b'.repeat(40); },
     rememberLogin: () => { rememberLogin = true; },
-    answers: (a: string[]) => { answers = a; }, statuses: (s: number[]) => { statuses = s; },
+    answers: (a: string[]) => { answers = a; }, modeAnswers: (a: string[]) => { modeAnswers = a; }, statuses: (s: number[]) => { statuses = s; },
     busy: () => { occupied = true; }, dirty: () => { dirty = true; }, unhealthy: () => { unhealthy = true; },
     failBuild: () => { failBuild = true; }, healthDelay: () => { healthDelay = 2; }, waits: () => waits,
     state: () => JSON.parse(fs.readFileSync(path.join(root, 'install-state.json'), 'utf8')),
@@ -108,6 +110,23 @@ test('only a human yes answer permits one conflict retry with the same device ke
   assert.equal(f.registrations[0].uuid, f.registrations[1].uuid);
   const failed = fixture(t); failed.statuses([-101,-101]); failed.answers([EMAIL, PASSWORD, 'y']);
   await assert.rejects(bootstrapLocal(failed.host), { code: 'PC_SESSION_CONFLICT' }); assert.equal(failed.registrations.length, 2);
+});
+
+test('the install asks the agent mode once: Enter keeps ask, trust needs the risk notice and an explicit yes', async t => {
+  const plain = fixture(t); await bootstrapLocal(plain.host);
+  assert.match(plain.env(), /^KAKAO_AGENT_MODE=ask$/m);
+  assert.ok(plain.logs.some(l => l.includes('에이전트 모드: ask')));
+
+  const declined = fixture(t); declined.modeAnswers(['trust', '']); await bootstrapLocal(declined.host);
+  assert.match(declined.env(), /^KAKAO_AGENT_MODE=ask$/m, 'Enter at the risk question keeps ask');
+  assert.ok(declined.logs.some(l => l.includes('프롬프트 인젝션')), 'the risk notice is shown before choosing trust');
+
+  const trusted = fixture(t); trusted.modeAnswers(['bogus', 'TRUST', 'y']); await bootstrapLocal(trusted.host);
+  assert.match(trusted.env(), /^KAKAO_AGENT_MODE=trust$/m);
+
+  const rejected = fixture(t); rejected.statuses([-142]); rejected.modeAnswers(['trust', 'y']);
+  await assert.rejects(bootstrapLocal(rejected.host), { code: 'APPROVAL_REQUIRED' });
+  assert.ok(!rejected.logs.some(l => l.includes('프롬프트 인젝션')), 'no mode question before the account is connected');
 });
 
 test('phone rejection preserves the pending key for a human retry and never starts the service', async t => {

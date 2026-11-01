@@ -1,6 +1,6 @@
 {
   "name": "kakao-max",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Unofficial headless KakaoTalk account daemon and MCP server for AI agents",
   "license": "MIT",
   "author": "ziesski",

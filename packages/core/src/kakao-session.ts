@@ -132,7 +132,7 @@ export class KakaoSession {
       log: (l) => this.log(l)
     });
 
-    this.session.on('connected', (info: { endpoint: { host: string; port: number }; loginList: any }) => {
+    this.onSession('connected', (info: { endpoint: { host: string; port: number }; loginList: any }) => {
       this.connected = true;
       this.endpoint = info.endpoint;
       const { fromLoginList, remembered } = this.chats.loadLoginList(info.loginList.conversations);
@@ -145,29 +145,29 @@ export class KakaoSession {
       if (Array.isArray(deleted)) for (const id of deleted) this.chatLeft(String(id), 'login_list');
       void this.chats.resolveAll();
     });
-    this.session.on('reconnecting', (i: { attempt: number; delayMs: number }) => {
+    this.onSession('reconnecting', (i: { attempt: number; delayMs: number }) => {
       this.connected = false;
       this.readAccessChanged();
       this.log(`reconnecting (attempt ${i.attempt}, in ${i.delayMs}ms)`);
     });
-    this.session.on('refreshed', () => this.log('credentials refreshed; reconnecting with new token'));
-    this.session.on('message', (m: IncomingMessage) => this.ingest(m));
-    this.session.on('read', (r: ReadReceipt) => {
+    this.onSession('refreshed', () => this.log('credentials refreshed; reconnecting with new token'));
+    this.onSession('message', (m: IncomingMessage) => this.ingest(m));
+    this.onSession('read', (r: ReadReceipt) => {
       this.log('read receipt received');
       if (r.chatId && r.watermark) {
         this.noteReaderWatermark(String(r.chatId), r.userId ? String(r.userId) : '', String(r.watermark));
       }
       this.feed.pushReadReceipt(r);
     });
-    this.session.on('error', (e: Error) => this.log(`session error: ${toKakaoError(e).code}`));
+    this.onSession('error', (e: Error) => this.log(`session error: ${toKakaoError(e).code}`));
     // Pushes not yet seen live. Logged so a live test can see whether they arrive.
-    this.session.on('syncmodmsg', (m: { chatLog?: IncomingMessage }) =>
+    this.onSession('syncmodmsg', (m: { chatLog?: IncomingMessage }) =>
       this.log('message modification received')
     );
     // "Delete for everyone" done on another device (✅ 2026-10-20, phone in a 1:1). The push's chatLog
     // is not the deleted message but a type 0 feed notice whose text is
     // {"logId": <deleted>, "byHost", "hidden", "feedType": 14}; the server sets 0x4000 on the target.
-    this.session.on('syncdlmsg', (m: { chatLog?: IncomingMessage }) => {
+    this.onSession('syncdlmsg', (m: { chatLog?: IncomingMessage }) => {
       const notice = m.chatLog;
       const target = deletedLogIdOf(notice);
       this.log('message deletion received');
@@ -178,7 +178,7 @@ export class KakaoSession {
     });
     // Every unsolicited packet except the two handled above, whatever its packet id: the server's
     // way of telling this device about the user's own phone activity is still unknown.
-    this.session.on('packet', (pkt: LocoPacket) => {
+    this.onSession('packet', (pkt: LocoPacket) => {
       if (pkt.header.method !== 'MSG' && pkt.header.method !== 'DECUNREAD') {
         const d = (pkt.data || {}) as Record<string, unknown>;
         // SYNCACTION {userId, chatId, type, logId} is a
@@ -1580,6 +1580,21 @@ export class KakaoSession {
 
   private withAuthorName(chatId: string, m: IncomingMessage): IncomingMessage & { authorName?: string } {
     return { ...m, authorName: this.chats.authorName(chatId, m.authorId) };
+  }
+
+  /**
+   * Subscribe to a LOCO session event. These handlers run inside the socket reader, so a failure
+   * (a storage error, a history conflict, an id that is not canonical) is logged by its error code
+   * only and never reaches the connection or the process.
+   */
+  private onSession<A extends unknown[]>(event: string, handler: (...args: A) => void): void {
+    this.session.on(event, (...args: unknown[]) => {
+      try {
+        handler(...(args as A));
+      } catch (e) {
+        this.log(`${event} event handling failed: ${toKakaoError(e).code}`);
+      }
+    });
   }
 
   private log(line: string): void {

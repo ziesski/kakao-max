@@ -33,7 +33,7 @@ export type KakaoErrorCode =
   | 'CURSOR_CONFLICT' // another collector advanced the durable source checkpoint
   | 'LEASE_CONFLICT' // event lease expired, changed owner or was superseded
   | 'HISTORY_CONFLICT' // incompatible records for the same history revision
-  | 'ROOM_NOT_READ' // room unread count is nonzero or cannot be confirmed
+  | 'ROOM_NOT_READ' // unread preview could not confirm the room's unread count
   | 'WORKER_IN_USE' // a worker owns the account or its shutdown is uncertain
   | 'INTERNAL'; //        a bug or an unexpected condition
 
@@ -65,7 +65,7 @@ export function recoveryAdvice(code: KakaoErrorCode): { action: string; message:
     case 'PC_SESSION_CONFLICT': return { action: 'ask_account_owner', message: 'Another PC may own the account. Keep its connection and ask the person; do not retry with forced login.' };
     case 'NOT_CONNECTED':
     case 'NETWORK': return { action: 'diagnose_connection', message: `The connector reconnects automatically. If unavailable, run ${setupCommand('--doctor')} with the same --listen/--ssh settings. Never replay an uncertain mutation.` };
-    case 'ROOM_NOT_READ': return { action: 'inspect_room_read_state', message: 'Refresh get_room_access metadata. Message access and marking read require separate permissions; never mark read automatically.' };
+    case 'ROOM_NOT_READ': return { action: 'inspect_room_read_state', message: 'Unread preview needs fresh unread metadata: call list_chats with chatId and refreshReadState=true, then retry. Never mark read automatically.' };
     case 'POLICY_DENIED': return { action: 'review_scope_with_person', message: 'Inspect the policy and room access. Request only the scope the person asked for through the client approval flow.' };
     case 'SEND_OUTCOME_UNKNOWN':
     case 'MUTATION_OUTCOME_UNKNOWN': return { action: 'inspect_existing_operation', message: 'Inspect the operation with its existing requestId; never invent a replacement ID or automatically resend.' };

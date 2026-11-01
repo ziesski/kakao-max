@@ -4,14 +4,14 @@ import { markUntrusted, UNTRUSTED_TOOL_NOTE } from '../untrusted.ts';
 import type { McpStdioServer } from '../mcp-stdio.ts';
 
 export function registerMessageInboxTools(server: McpStdioServer, kakao: Pick<KakaoSession, 'claimMessageEvents' | 'ackMessageEvents'>): void {
-  const room = { chatId: { type: 'string', description: 'Exactly one authorized, currently read room.' },
+  const room = { chatId: { type: 'string', description: 'Exactly one authorized room.' },
     consumer: { type: 'string', description: 'Stable local worker identity (competing consumers, not authenticated remote principals).' },
-    readGrantId: { type: 'string', description: 'Manual rooms only: ID from a human-approved read_room operation covering this tool. Never bypasses deny, unread or schedule restrictions.' } };
+    readGrantId: { type: 'string', description: 'Manual rooms only: ID from a human-approved read_room operation covering this tool. Never bypasses deny or schedule restrictions.' } };
   server.registerTool({
     name: 'claim_message_events',
     group: 'events',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    description: 'Claim durable locally received message events, scoped to one authorized read room. No server message history is fetched and no read receipt is sent. ' +
+    description: 'Claim durable locally received message events, scoped to one authorized room. No server message history is fetched and no read receipt is sent. ' +
       'Returns stable eventId/sourceGeneration plus unique leaseId and expiry per event. Process idempotently and durably before ack_message_events. ' +
       'A crash or lost response leaves events available after lease expiry; hasMore describes currently claimable work in this room only. ' +
       'Loop over bounded claims while hasMore; do not wait for another source write. Events predate this queue only when subsequently observed live. ' +

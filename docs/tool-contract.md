@@ -70,8 +70,8 @@ pause·상한·속도 제한·방 허가 하루 한도는 그대로이고, 저�
 `revoke_permission room:<chatId>`는 규칙을 지우지 않고 deny를 저장합니다. 기본 허용으로 되돌리려면
 `request_permission type=room_default`로 사람 승인을 받습니다. 읽음 표시·나가기·방 정보 변경은 이 예외에 들어가지 않습니다.
 
-읽기 허가는 기본 read_messages, 20개, 1회, 10분입니다. unread/unknown 방의 일반 본문 조회 제한은
-유지됩니다. 특별 unread preview도 별도 수동 규칙·짧은 만료·읽기 허가가 있어야 합니다.
+읽기 허가는 기본 read_messages, 20개, 1회, 10분입니다. 허가한 방은 안 읽은 메시지가 있어도 읽을 수 있고,
+읽기는 읽음 표시를 보내지 않습니다. 특별 unread preview는 별도 수동 규칙·짧은 만료·읽기 허가가 있어야 합니다.
 고정 문구 사전 승인 기능은 제거했습니다. 방 허가는 전송 문구를 제한하지 않으므로 승인할 때
 그 차이를 확인해야 합니다. `KAKAO_RECIPIENT_DAILY_LIMIT`는 방 허가 사용의 하루 한도(기본 50)입니다.
 `add_friend`는 모드와 관계없이 `KAKAO_ADD_FRIEND_DAILY_LIMIT`(1–100, 기본 10) 안에서만 실행됩니다.

@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { McpStdioServer } from './mcp-stdio.ts';
-import { KakaoSession, SendPolicy, AgentSendService, AgentPublicationService, AgentMutationService, AgentOperationEngine, AGENT_CONTROL_DEFINITIONS, AgentSendJournal, ApprovalStore, ApproverRegistry, RecipientPermissions, DailyActionLimit, approvalWindowFromConfig, loadConfig, loadPolicyConfig, KakaoError, toKakaoError, agentModeApproves, MCP_TOOL_GROUPS } from '@kakao-max/core';
+import { KakaoSession, SendPolicy, AgentSendService, AgentPublicationService, AgentMutationService, AgentOperationEngine, AGENT_CONTROL_DEFINITIONS, AgentSendJournal, ApprovalStore, ApproverRegistry, RecipientPermissions, DailyActionLimit, approvalWindowFromConfig, loadConfig, loadPolicyConfig, KakaoError, toKakaoError, agentModeApproves, MCP_TOOL_GROUPS, SETTLE_GRACE_MS } from '@kakao-max/core';
 import { serveSocket, parseListenSpec, validateListenSpec } from './socket-transport.ts';
 import { allowedUids } from './peer-user.ts';
 import { registerMessageInboxTools } from './tools/message-inbox.ts';
@@ -97,6 +97,14 @@ async function main() {
   server.setClientApproval(kakao.config.approval.clientConfirm ? new ElicitationApprovals(approvals, Date.now, recipients, roomReads) : undefined);
   registry.list(); // fail fast on an unsafe or corrupt registry, before the account session opens
   agentSendService = new AgentSendService({ principal: 'local-mcp', journal: agentJournal, adapter: agentMessageAdapter(kakao), policy, approvals, approvalWindow, recipients, modeApproves });
+  // After each reconnection, settle sends whose outcome was lost with the connection, from the rooms' own history.
+  // One more pass after the grace period covers attempts that were too recent to call undelivered.
+  const sends = agentSendService;
+  kakao.onConnected(() => {
+    void sends.settlePending().then(remaining => {
+      if (remaining > 0) setTimeout(() => { void sends.settlePending().catch(() => {}); }, SETTLE_GRACE_MS + 1000).unref();
+    }).catch(() => {});
+  });
   agentPublicationService = new AgentPublicationService({ principal: 'local-mcp', journal: agentJournal, adapter: agentPublicationAdapter(kakao, policy), policy, approvals, approvalWindow, recipients: recipients, modeApproves });
   agentMutationService = new AgentMutationService({ principal: 'local-mcp', journal: agentJournal, adapter: agentMutationAdapter(kakao), policy, approvals, approvalWindow, modeApproves, isMemoChat });
   agentOperationEngine = new AgentOperationEngine({ principal: 'local-mcp', journal: agentJournal, adapter: agentControlAdapter(kakao, policy, recipients, friendAdds, optionalModules.map(m => ({ actions: m.operations.map(d => d.action), inspect: m.inspect }))),

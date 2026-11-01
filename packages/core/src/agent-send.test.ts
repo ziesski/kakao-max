@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { AgentSendJournal, AgentSendService, parseAgentMessage, type AgentMessage, type AgentSendAdapter } from './agent-send.ts';
+import { AgentSendJournal, AgentSendService, parseAgentMessage, clientMsgIdFor, SETTLE_GRACE_MS, type AgentMessage, type AgentSendAdapter } from './agent-send.ts';
+import { LocoError } from '@kakao-max/protocol';
 import { fixtureApprovals } from './approval-fixture.test-helper.ts';
 import { SendPolicy } from './policy.ts';
 import { KakaoError } from './errors.ts';
@@ -13,10 +14,14 @@ function fixture(t: { after(fn: () => void): void }, notification = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-send-'));
   let now = 1000000, context = 'local-version-1', account = '123456789', connected = true, calls = 0;
   let effect: AgentSendAdapter['send'] = async () => ({ status: 0, logId: '9007199254740993' });
+  let history: AgentSendAdapter['findSent'];
+  const msgIds: Array<number | undefined> = [];
   const policy = () => new SendPolicy({ ceiling: ['123456789','987654321'], notifyChatId: notification ? '123456789' : undefined,
     pausedAtStart: false, auditLogPath: path.join(root, 'audit.jsonl') }, { now: () => now });
   const adapter: AgentSendAdapter = { accountId: () => account, connected: () => connected,
-    context: () => context, send: async m => { calls++; return effect(m); } };
+    context: () => context, send: async (m, attempt) => { calls++; msgIds.push(attempt?.msgId); return effect(m, attempt); },
+    roomCursor: () => '9007199254740000',
+    findSent: async (chatId, msgId, since) => history ? history(chatId, msgId, since) : { found: false, complete: false } };
   const journals: AgentSendJournal[] = [];
   const create = () => {
     const journal = AgentSendJournal.open(root); journals.push(journal);
@@ -27,8 +32,9 @@ function fixture(t: { after(fn: () => void): void }, notification = false) {
   const current = create();
   t.after(() => { for (const j of journals) j.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const message: AgentMessage = { chatId: '123456789', text: 'fixture-private-message 가' };
-  return { ...current, root, message, create, calls: () => calls,
+  return { ...current, root, message, create, calls: () => calls, msgIds: () => msgIds,
     effect: (value: AgentSendAdapter['send']) => { effect = value; },
+    history: (value: AgentSendAdapter['findSent']) => { history = value; },
     advance: (ms: number) => { now += ms; }, context: (value: string) => { context = value; },
     account: (value: string) => { account = value; }, disconnect: () => { connected = false; } };
 }
@@ -117,12 +123,13 @@ test('success followed by outcome persistence failure leaves a restart-fenced at
   assert.equal(f.calls(), 1);
 });
 
-test('post-adapter errors and malformed acknowledgements are uncertain and never automatically retryable', async t => {
-  for (const result of ['NOT_CONNECTED','INVALID_ARGUMENT','POLICY_DENIED','NETWORK','numeric-id','status'] as const) {
+test('post-write errors and malformed acknowledgements are uncertain and never automatically retryable', async t => {
+  for (const result of ['CLOSED','TIMEOUT','POLICY_DENIED','NETWORK','numeric-id','status'] as const) {
     const f = fixture(t, true), id = randomUUID(); f.service.prepare(id, f.message);
     f.effect(async () => {
       if (result === 'numeric-id') return { status: 0, logId: Number('9007199254740993') } as any;
       if (result === 'status') return { status: -1 };
+      if (result === 'CLOSED' || result === 'TIMEOUT') throw new LocoError(result, 'fixture connection lost after the write');
       throw new KakaoError(result, 'fixture after possible external effect');
     });
     await assert.rejects(f.service.send(id, f.message), { code: 'SEND_OUTCOME_UNKNOWN', retryable: false });
@@ -227,4 +234,65 @@ test('replacing the local database cannot silently discard journal identity whil
   const f = fixture(t); f.journal.close();
   fs.unlinkSync(path.join(f.root, 'kakao.db'));
   assert.throws(() => AgentSendJournal.open(f.root), { code: 'CONFIG_INVALID' });
+});
+
+test('a send that certainly did not happen is reported as not sent and goes out on a retry with the same requestId', async t => {
+  const failures: Array<[string, () => never]> = [
+    ['NOT_CONNECTED', () => { throw new KakaoError('NOT_CONNECTED', 'fixture: no session before writing'); }],
+    ['NOT_CONNECTED', () => { throw new LocoError('NOT_CONNECTED', 'fixture: socket gone before writing'); }],
+    ['LOCO_STATUS', () => { throw new KakaoError('LOCO_STATUS', 'WRITE failed with status -805', { details: { command: 'WRITE', status: -805 } }); }],
+    ['INVALID_ARGUMENT', () => { throw new LocoError('INVALID_ARGUMENT', 'fixture: refused before writing'); }]
+  ];
+  for (const [code, fail] of failures) {
+    const f = fixture(t, true), id = randomUUID(); f.service.prepare(id, f.message);
+    f.effect(async () => fail());
+    await assert.rejects(f.service.send(id, f.message), (e: KakaoError) => e.code === code && /not sent/.test(e.message));
+    assert.equal(f.journal.get(id)?.state, 'approved', `${code}: back to approved, not uncertain`);
+    f.effect(async () => ({ status: 0, logId: '9007199254740993' }));
+    assert.equal((await f.service.send(id, f.message)).logId, '9007199254740993');
+    assert.equal(f.calls(), 2);
+    assert.deepEqual(f.msgIds(), [clientMsgIdFor(id), clientMsgIdFor(id)], 'the retry carries the same client message ID');
+  }
+});
+
+test('a lost reply is settled from room history: found means sent, without sending again', async t => {
+  const f = fixture(t, true), id = randomUUID(); f.service.prepare(id, f.message);
+  f.effect(async () => { throw new LocoError('CLOSED', 'fixture connection lost after the write'); });
+  const looked: Array<[string, number, string]> = [];
+  f.history(async (chatId, msgId, since) => { looked.push([chatId, msgId, since]); return { found: true, logId: '9007199254741111' }; });
+  const sent = await f.service.send(id, f.message);
+  assert.equal(sent.logId, '9007199254741111'); assert.equal(f.journal.get(id)?.state, 'sent_unverified');
+  assert.deepEqual(looked, [['123456789', clientMsgIdFor(id), '9007199254740000']]);
+  assert.equal(f.calls(), 1);
+});
+
+test('an absent message counts as undelivered only after the grace period and complete history, then the same requestId sends it once', async t => {
+  const f = fixture(t, true), id = randomUUID(); f.service.prepare(id, f.message);
+  f.effect(async () => { throw new LocoError('CLOSED', 'fixture connection lost after the write'); });
+  f.history(async () => ({ found: false, complete: true }));
+  await assert.rejects(f.service.send(id, f.message), { code: 'SEND_OUTCOME_UNKNOWN' });
+  assert.equal(f.journal.get(id)?.state, 'send_unknown', 'too recent to call undelivered');
+  await assert.rejects(f.service.send(id, f.message), { code: 'SEND_OUTCOME_UNKNOWN' });
+  assert.equal(f.calls(), 1, 'never resent while the outcome is open');
+
+  f.advance(SETTLE_GRACE_MS);
+  assert.equal(await f.service.settlePending(), 0);
+  assert.equal(f.journal.get(id)?.state, 'approved', 'settled as not delivered; nothing sent in the background');
+  assert.equal(f.calls(), 1);
+  f.effect(async () => ({ status: 0, logId: '9007199254740993' }));
+  assert.equal((await f.service.send(id, f.message)).logId, '9007199254740993');
+  assert.equal(f.calls(), 2); assert.deepEqual(f.msgIds(), [clientMsgIdFor(id), clientMsgIdFor(id)]);
+});
+
+test('incomplete history or a failed lookup leaves the send uncertain and never resends', async t => {
+  for (const lookup of [async () => ({ found: false as const, complete: false }), async () => { throw new LocoError('CLOSED', 'fixture lookup failed'); }]) {
+    const f = fixture(t, true), id = randomUUID(); f.service.prepare(id, f.message);
+    f.effect(async () => { throw new LocoError('TIMEOUT', 'fixture reply never came'); });
+    f.history(lookup);
+    await assert.rejects(f.service.send(id, f.message), { code: 'SEND_OUTCOME_UNKNOWN' });
+    f.advance(SETTLE_GRACE_MS);
+    assert.equal(await f.service.settlePending(), 1);
+    await assert.rejects(f.service.send(id, f.message), { code: 'SEND_OUTCOME_UNKNOWN' });
+    assert.equal(f.calls(), 1);
+  }
 });

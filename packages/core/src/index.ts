@@ -19,7 +19,7 @@ export { AGENT_MODES, TRUST_APPROVED_ACTIONS, TRUST_RISK_NOTICE, agentModeApprov
 
 export { RoomAccessPolicy, READ_GRANT_TOOLS, registerReadGrantTool, isReadGrantTool, type ReadApproval, type ReadGrantTool } from './room-access.ts';
 
-export { AgentSendService, AgentSendJournal, parseAgentMessage, canonicalAgentJson, type AgentMessage, type AgentSendAdapter } from './agent-send.ts';
+export { AgentSendService, AgentSendJournal, parseAgentMessage, canonicalAgentJson, clientMsgIdFor, SETTLE_GRACE_MS, type AgentMessage, type AgentSendAdapter, type SendAttempt } from './agent-send.ts';
 export { RecipientPermissions, RECIPIENT_ACTIONS } from './recipient-permissions.ts';
 export { DailyActionLimit } from './daily-action-limit.ts';
 

@@ -21,6 +21,7 @@ import {
   type ChannelMeta,
   type ModifyMessageResult,
   type WriteResult,
+  type WriteOptions,
   type LocoPacket,
   Int32,
   Long,
@@ -95,6 +96,7 @@ export class KakaoSession {
   private readonly readAccessListeners = new Set<(chatId?: string) => void>();
   private readonly readerWatermarks = new Map<string, string>();
   private readonly leftListeners: Array<(chatId: string, reason: LeftReason) => void> = [];
+  private readonly connectedListeners: Array<() => void> = [];
   private connected = false;
   private endpoint?: { host: string; port: number };
 
@@ -144,6 +146,9 @@ export class KakaoSession {
       const deleted = info.loginList.raw?.delChatIds;
       if (Array.isArray(deleted)) for (const id of deleted) this.chatLeft(String(id), 'login_list');
       void this.chats.resolveAll();
+      for (const listener of this.connectedListeners) {
+        try { listener(); } catch (e) { this.log(`connected listener failed: ${toKakaoError(e).code}`); }
+      }
     });
     this.onSession('reconnecting', (i: { attempt: number; delayMs: number }) => {
       this.connected = false;
@@ -348,6 +353,8 @@ export class KakaoSession {
    * permission lives in the agent journal). A failure is logged, never thrown into the push handler.
    */
   onChatLeft(listener: (chatId: string, reason: LeftReason) => void): void { this.leftListeners.push(listener); }
+  /** Called after each (re)connection, once the chat list is loaded. */
+  onConnected(listener: () => void): void { this.connectedListeners.push(listener); }
   private chatLeft(chatId: string, reason: LeftReason): void {
     if (!/^[1-9]\d{0,18}$/.test(chatId)) return;
     this.chats.remove(chatId);
@@ -423,9 +430,9 @@ export class KakaoSession {
       readReceiptSent: false as const, historyFetchSent: false as const };
   }
 
-  async sendMessage(chatId: string, text: string) {
+  async sendMessage(chatId: string, text: string, opts: WriteOptions = {}) {
     this.requireConnected();
-    const res = await this.session.sendText(chatId, text);
+    const res = await this.session.sendText(chatId, text, opts);
     if (res.status !== 0) throw locoStatusError('WRITE', res.status);
     this.ingestSent(chatId, res, text, 1);
     return res;
@@ -469,9 +476,9 @@ export class KakaoSession {
     return { status: res.status, watermark: effectiveWatermark };
   }
 
-  async sendReply(chatId: string, text: string, reply: { logId: string; userId: string; type?: number; message?: string }) {
+  async sendReply(chatId: string, text: string, reply: { logId: string; userId: string; type?: number; message?: string }, opts: WriteOptions = {}) {
     this.requireConnected();
-    const res = await this.session.sendReply(chatId, text, reply);
+    const res = await this.session.sendReply(chatId, text, reply, opts);
     if (res.status !== 0) throw locoStatusError('WRITE', res.status);
     this.ingestSent(chatId, res, text, 26);
     return res;
@@ -535,10 +542,11 @@ export class KakaoSession {
   async sendWithMentions(
     chatId: string,
     text: string,
-    mentions: { userId: string; at: number[]; len: number }[]
+    mentions: { userId: string; at: number[]; len: number }[],
+    opts: WriteOptions = {}
   ) {
     this.requireConnected();
-    const res = await this.session.sendWithMentions(chatId, text, mentions);
+    const res = await this.session.sendWithMentions(chatId, text, mentions, opts);
     if (res.status !== 0) throw locoStatusError('WRITE', res.status);
     this.ingestSent(chatId, res, text, 1);
     return res;
@@ -1473,10 +1481,11 @@ export class KakaoSession {
    * Record a message we just sent. The server's WRITE response echoes the stored chatLog
    * (e.g. type 26 + quote attachment for a reply); prefer it over what we asked for.
    */
+  /** Record our own sent message locally. The send already succeeded, so a storage failure is logged, never thrown. */
   private ingestSent(chatId: string, res: { logId?: string; raw?: Record<string, any> }, text: string, fallbackType: number): void {
     if (!res.logId) return;
     const echo = res.raw?.chatLog as Record<string, any> | undefined;
-    this.ingest({
+    try { this.ingest({
       chatId: String(chatId),
       authorId: this.selfUserId,
       messageId: res.logId,
@@ -1485,7 +1494,38 @@ export class KakaoSession {
       attachment: echo?.attachment ?? undefined,
       sendAt: typeof echo?.sendAt === 'number' ? echo.sendAt : Math.floor(Date.now() / 1000),
       raw: res.raw ?? {}
-    });
+    }); } catch (e) { this.log(`sent message not stored locally: ${toKakaoError(e).code}`); }
+  }
+
+  /**
+   * Find one of our own messages in a room's server history by the client message ID it was sent with,
+   * reading forward from `sinceLogId` (the room's newest log before the send). `complete` means the
+   * history up to now was read, so an absent message was not delivered. Reads no content into the store.
+   */
+  async findOwnMessage(chatId: string, msgId: number, sinceLogId: string, maxPages = 5): Promise<{ found: true; logId: string } | { found: false; complete: boolean }> {
+    this.requireConnected();
+    let since = /^\d{1,19}$/.test(sinceLogId) ? sinceLogId : '0';
+    for (let page = 0; page < maxPages; page++) {
+      const res = await this.session.chatLogs([chatId], [since]);
+      if (res.status !== 0) throw locoStatusError('MCHATLOGS', res.status);
+      for (const m of res.messages) {
+        if (m.authorId === this.selfUserId && m.messageId && Number(String(m.raw?.msgId ?? '')) === msgId) return { found: true, logId: m.messageId };
+      }
+      const last = res.messages[res.messages.length - 1]?.messageId;
+      if (res.eof || !last || last === since) return { found: false, complete: res.eof || res.messages.length === 0 };
+      since = last;
+    }
+    return { found: false, complete: false };
+  }
+
+  /** Resolve true once the account session is connected, or false after `timeoutMs`. */
+  async waitConnected(timeoutMs: number): Promise<boolean> {
+    const until = Date.now() + timeoutMs;
+    while (!this.connected) {
+      if (Date.now() >= until) return false;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return true;
   }
 
   /** Fill in an author name that was unknown when the message was stored or buffered. */

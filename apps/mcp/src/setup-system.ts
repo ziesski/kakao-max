@@ -7,7 +7,7 @@ import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { KakaoDeviceRegistration, type SignRegistrationResult } from '@kakao-max/protocol';
-import { KakaoError, isMainModule, installRoot, packagedEntry, programArgs } from '@kakao-max/core';
+import { KakaoError, isMainModule, installRoot, packagedEntry, programArgs, TRUST_RISK_NOTICE, type AgentMode } from '@kakao-max/core';
 import { confirmSetup, terminalPrompt, type SetupPrompt } from './setup-prompts.ts';
 import { probe } from './healthcheck.ts';
 import { parseEnv } from '../../../packages/core/src/env-file.ts';
@@ -83,6 +83,19 @@ export function installPort(value: string): number {
 }
 
 /** Only bootstrap our own manifest. Legacy service/configuration is never adopted or restarted. */
+/** The person picks the agent mode once, at install. Enter keeps ask; trust needs the risk notice and a yes. */
+export async function chooseAgentMode(prompt: SetupPrompt, log: (text: string) => void): Promise<AgentMode> {
+  log('에이전트 모드를 고르세요. ask(기본): 방마다 처음 한 번 확인 창으로 묻고, 허가한 방만 읽고 보냅니다. ' +
+    'trust: 묻지 않고 모든 방을 읽고 보냅니다(일시정지·한도·명시한 거부는 유지). 나중에 setup --mode로 바꿀 수 있습니다.');
+  for (;;) {
+    const answer = (await prompt('에이전트 모드 (Enter: ask, 또는 trust): ')).trim().toLowerCase();
+    if (!answer || answer === 'ask') return 'ask';
+    if (answer !== 'trust') continue;
+    log(TRUST_RISK_NOTICE);
+    return await confirmSetup(prompt, '위 안내를 확인했고 trust를 선택합니다') ? 'trust' : 'ask';
+  }
+}
+
 export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'configured' | 'cancelled'> {
   const port = installPort(String(h.port ?? 8787)), listen = `127.0.0.1:${port}`;
   const service = h.serviceName ?? SERVICE, unit = `${service}.service`;
@@ -243,6 +256,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
         if (e instanceof KakaoError && e.code === 'PC_SESSION_CONFLICT') throw e;
         throw new KakaoError('NETWORK', 'Account registration failed; credentials and upstream response were not logged', { retryable: false });
       } finally { password = ''; }
+      const mode = result.status === 0 ? await chooseAgentMode(h.prompt, h.log) : undefined;
       if (result.failure) throw new KakaoError(result.failure === 'unsupported-method' ? 'NOT_IMPLEMENTED' : 'LOCO_STATUS', result.failure === 'unsupported-method' ? '이 계정의 인증 방식을 확인할 수 없습니다. 로그인 재시도를 멈췄습니다.' : '인증번호 응답 형식이 예상과 달라 중단했습니다. 서비스는 시작하지 않았습니다.');
       if (!Number.isSafeInteger(result.status)) throw new KakaoError('LOCO_STATUS', 'Malformed account response; no credentials were persisted and no service was started');
       if (result.status === -142) throw new KakaoError('APPROVAL_REQUIRED', '휴대폰 승인이 완료되지 않았습니다. 기기 키는 보존했습니다. 준비되면 마법사를 다시 실행하세요. 서비스는 시작하지 않았습니다.');
@@ -254,7 +268,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
         throw new KakaoError('CONFIG_INVALID', 'Registration returned incomplete credentials; nothing was persisted');
       }
       const config = { ...values, KAKAO_DATA_DIR: data, KAKAO_AUDIT_LOG: path.join(data, 'audit.log'), KAKAO_MCP_LISTEN: listen,
-        KAKAO_ENABLE_TOKEN_REFRESH: loginData ? '1' : '0',
+        KAKAO_ENABLE_TOKEN_REFRESH: loginData ? '1' : '0', KAKAO_AGENT_MODE: mode,
         KAKAO_AUTH_RELOGIN_MAX_ATTEMPTS: '3', KAKAO_EMAIL: loginData?.email, KAKAO_PASSWORD: loginData?.password,
         KAKAO_MCP_ALLOWED_UIDS: h.operatorUid !== undefined ? String(h.operatorUid) : undefined };
       writePrivate(envFile, Object.entries(config).filter(([,v]) => v !== undefined).map(([k,v]) => `${k}=${v}`).join('\n') + '\n', serviceUid, serviceGid);
@@ -280,7 +294,7 @@ export async function bootstrapLocal(h: BootstrapHost): Promise<'ready' | 'confi
     }
     if (await h.occupied()) throw new KakaoError('WORKER_IN_USE', 'Another process owns the MCP endpoint; it was not stopped');
     h.log('설치와 계정 설정이 준비되었습니다. 시작하면 데몬 하나가 계정에 연결합니다. 내용 조회·전송 방 허가는 아직 없습니다.');
-    h.log(`시작할 버전: ${pin}\n서비스 계정: ${service}\n코드: ${app}\n계정 데이터: ${data}\nMCP: ${listen}, assistant/rooms. 공개 포트·자동 답장은 켜지 않습니다.`);
+    h.log(`시작할 버전: ${pin}\n서비스 계정: ${service}\n코드: ${app}\n계정 데이터: ${data}\nMCP: ${listen}, assistant/rooms. 공개 포트·자동 답장은 켜지 않습니다.\n에이전트 모드: ${saved.KAKAO_AGENT_MODE || 'ask'}`);
     if (!await confirmSetup(h.prompt, '서비스를 등록하고 시작할까요?', true)) return 'configured';
     ownerPath(path.dirname(h.unitFile), true);
     if (present(h.unitFile)) ownerPath(h.unitFile);

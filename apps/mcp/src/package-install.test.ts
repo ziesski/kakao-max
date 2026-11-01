@@ -31,7 +31,7 @@ function fixture(t: { after(fn: () => void): void }) {
   const host: BootstrapHost = {
     root, repo, unitFile: path.join(parent, 'daemon.service'), node: '/usr/bin/node', npm: '',
     reason: 'fixture package bootstrap', release: release(parent, 'release-1', '0.1.0', '// daemon 0.1.0\n'),
-    log: () => {}, prompt: async q => q.startsWith('자동 재로그인을 위해') ? '' : answers.shift() ?? '',
+    log: () => {}, prompt: async q => q.startsWith('자동 재로그인을 위해') || q.startsWith('에이전트 모드') ? '' : answers.shift() ?? '',
     run: (program, args) => {
       commands.push({ program, args });
       if (program === 'getent') return user ? `kakao-max:x:${uid}:${gid}::/var/lib/kakao-max:/usr/sbin/nologin` : '';

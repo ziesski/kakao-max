@@ -82,6 +82,20 @@ export interface WriteResult {
   raw: Record<string, any>;
 }
 
+/** Options for a text WRITE. */
+export interface WriteOptions {
+  /** The client message ID (positive 31-bit integer) the server echoes in the chat log; random when omitted. */
+  msgId?: number;
+}
+
+function clientMsgId(opts: WriteOptions): number {
+  if (opts.msgId === undefined) return Math.floor(Math.random() * 0x7fffffff);
+  if (!Number.isInteger(opts.msgId) || opts.msgId < 1 || opts.msgId > 0x7fffffff) {
+    throw new LocoError('INVALID_ARGUMENT', 'msgId must be a positive 31-bit integer', { command: 'WRITE' });
+  }
+  return opts.msgId;
+}
+
 /**
  * KakaoTalk media message types (the `type`/`logType` on a media WRITE/POST and on stored chat
  * logs). These are the commonly used LOCO values; confirm a number against the server before
@@ -349,14 +363,17 @@ export class LocoSession extends EventEmitter {
     });
   }
 
-  /** Send a text message to a conversation (LOCO `WRITE`, type 1). */
-  async sendText(chatId: string | number, text: string): Promise<WriteResult> {
+  /**
+   * Send a text message to a conversation (LOCO `WRITE`, type 1). `msgId` is the client's own message
+   * ID, echoed in the room's chat log; pass a stable one to find this send in history later.
+   */
+  async sendText(chatId: string | number, text: string, opts: WriteOptions = {}): Promise<WriteResult> {
     const body = {
       chatId: typeof chatId === 'number' ? BSON.Long.fromNumber(chatId) : BSON.Long.fromString(String(chatId)),
       msg: text,
       type: 1,
       noSeen: false,
-      msgId: Math.floor(Math.random() * 0x7fffffff),
+      msgId: clientMsgId(opts),
       extra: ''
     };
     const pkt = await this.request('WRITE', body);
@@ -505,7 +522,7 @@ export class LocoSession extends EventEmitter {
    * whose `extra` carries the reply attachment. Type must be 26 (type 1 renders as plain text
    * in KakaoTalk), and the attachment contains { src_linkId: 0, src_userId, src_logId, src_type, src_message }.
    */
-  async sendReply(chatId: string | number, text: string, reply: ReplyTarget): Promise<WriteResult> {
+  async sendReply(chatId: string | number, text: string, reply: ReplyTarget, opts: WriteOptions = {}): Promise<WriteResult> {
     const toLong = (v: string | number) => (typeof v === 'number' ? BSON.Long.fromNumber(v) : BSON.Long.fromString(String(v)));
     const srcUserId = typeof reply.userId === 'string' ? Number(reply.userId) : reply.userId;
     const srcLogId = String(reply.logId);
@@ -518,7 +535,7 @@ export class LocoSession extends EventEmitter {
       msg: text,
       type: 26,
       noSeen: false,
-      msgId: Math.floor(Math.random() * 0x7fffffff),
+      msgId: clientMsgId(opts),
       extra
     };
     const pkt = await this.request('WRITE', body);
@@ -820,7 +837,7 @@ export class LocoSession extends EventEmitter {
    * `{at,len,user_id}`, `all_mention` for @전체) is best-effort and not yet verified against the
    * server — a wrong encoding renders as a plain message (non-destructive).
    */
-  async sendWithMentions(chatId: string | number, text: string, mentions: MentionSpan[]): Promise<WriteResult> {
+  async sendWithMentions(chatId: string | number, text: string, mentions: MentionSpan[], opts: WriteOptions = {}): Promise<WriteResult> {
     const toLong = (v: string | number) => (typeof v === 'number' ? BSON.Long.fromNumber(v) : BSON.Long.fromString(String(v)));
     // user_id is written as a bare JSON integer (it can exceed 2^53, so it is not passed through
     // Number). That makes validation the only thing between an agent-supplied string and the JSON.
@@ -842,7 +859,7 @@ export class LocoSession extends EventEmitter {
       msg: text,
       type: 1,
       noSeen: false,
-      msgId: Math.floor(Math.random() * 0x7fffffff),
+      msgId: clientMsgId(opts),
       extra
     });
     const res = pkt.data as Record<string, any>;
@@ -1431,9 +1448,9 @@ export class ResilientLocoSession extends EventEmitter {
     return (await this.connectOnce()).loginList;
   }
 
-  async sendText(chatId: string | number, text: string): Promise<WriteResult> {
+  async sendText(chatId: string | number, text: string, opts: WriteOptions = {}): Promise<WriteResult> {
     if (!this.inner || this.inner.isClosed) throw new LocoError('NOT_CONNECTED', 'session not connected');
-    return this.inner.sendText(chatId, text);
+    return this.inner.sendText(chatId, text, opts);
   }
 
   async markRead(chatId: string | number, watermark: string | number): Promise<{ status: number }> {
@@ -1446,9 +1463,9 @@ export class ResilientLocoSession extends EventEmitter {
     return this.inner.deleteMessage(chatId, logId);
   }
 
-  async sendReply(chatId: string | number, text: string, reply: ReplyTarget): Promise<WriteResult> {
+  async sendReply(chatId: string | number, text: string, reply: ReplyTarget, opts: WriteOptions = {}): Promise<WriteResult> {
     if (!this.inner || this.inner.isClosed) throw new LocoError('NOT_CONNECTED', 'session not connected');
-    return this.inner.sendReply(chatId, text, reply);
+    return this.inner.sendReply(chatId, text, reply, opts);
   }
 
   async ship(
@@ -1561,9 +1578,9 @@ export class ResilientLocoSession extends EventEmitter {
     return this.inner.chatOnRoom(chatId, token);
   }
 
-  async sendWithMentions(chatId: string | number, text: string, mentions: MentionSpan[]): Promise<WriteResult> {
+  async sendWithMentions(chatId: string | number, text: string, mentions: MentionSpan[], opts: WriteOptions = {}): Promise<WriteResult> {
     if (!this.inner || this.inner.isClosed) throw new LocoError('NOT_CONNECTED', 'session not connected');
-    return this.inner.sendWithMentions(chatId, text, mentions);
+    return this.inner.sendWithMentions(chatId, text, mentions, opts);
   }
 
   async syncMessages(

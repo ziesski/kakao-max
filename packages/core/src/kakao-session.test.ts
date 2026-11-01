@@ -1020,3 +1020,32 @@ test('room departure stops a trust subscription and unknown rooms cannot be watc
   fake.emit('packet', { header: { id: 0, status: 0, method: 'LEFT' }, data: { chatId: CHAT } });
   assert.deepEqual(changes, ['NOT_FOUND']); stop();
 });
+
+test('a send carries the caller\'s client message ID, and a local storage failure after it never fails the send', async () => {
+  const lines: string[] = [];
+  const { kakao, fake } = setup({}, [], true, line => lines.push(line)); fake.connect();
+  fake.replies.sendText = [{ status: 0, logId: '9007199254740993', raw: {} }];
+  (kakao as any).ingest = () => { throw new KakaoError('INTERNAL', 'fixture storage failure'); };
+  const res = await kakao.sendMessage(CHAT, 'fixture', { msgId: 4242 });
+  assert.equal(res.logId, '9007199254740993');
+  assert.deepEqual(fake.calls.find(c => c.method === 'sendText')!.args, [CHAT, 'fixture', { msgId: 4242 }]);
+  assert.ok(lines.some(l => l === 'sent message not stored locally: INTERNAL'));
+});
+
+test('findOwnMessage matches our own message by client message ID across history pages', async () => {
+  const { kakao, fake } = setup(); fake.connect();
+  const log = (messageId: string, authorId: string, msgId: unknown) => ({ chatId: CHAT, messageId, authorId, type: 1, text: 'fixture', sendAt: 1, raw: { msgId } });
+  fake.replies.chatLogs = [
+    { status: 0, messages: [log('8001', '42', 77), log('8002', SELF, 76)], eof: false, raw: {} },
+    { status: 0, messages: [log('8003', SELF, Long.fromNumber(77))], eof: true, raw: {} }
+  ];
+  assert.deepEqual(await kakao.findOwnMessage(CHAT, 77, '8000'), { found: true, logId: '8003' }, 'another member\'s message with the same ID never matches');
+  const sinces = fake.calls.filter(c => c.method === 'chatLogs').map(c => c.args[1]);
+  assert.deepEqual(sinces, [['8000'], ['8002']]);
+  fake.replies.chatLogs = [{ status: 0, messages: [log('8004', SELF, 1)], eof: true, raw: {} }];
+  assert.deepEqual(await kakao.findOwnMessage(CHAT, 77, '8003'), { found: false, complete: true });
+  fake.replies.chatLogs = [{ status: 0, messages: [log('8005', SELF, 1)], eof: false, raw: {} }];
+  assert.deepEqual(await kakao.findOwnMessage(CHAT, 77, '8004', 1), { found: false, complete: false });
+  fake.replies.chatLogs = [{ status: -500, messages: [], eof: true, raw: {} }];
+  await assert.rejects(kakao.findOwnMessage(CHAT, 77, '8005'), { code: 'LOCO_STATUS' });
+});

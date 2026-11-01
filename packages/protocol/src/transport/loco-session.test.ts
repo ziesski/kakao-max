@@ -534,3 +534,17 @@ test('media reuse keeps legacy callers unchanged and opt-in publication resolves
   assert.equal(calls.at(-1)?.body.k, 'fixture-reuse-token');
   assert.equal(calls.some(c => c.method === 'WRITE'), false);
 });
+
+test('text WRITEs carry a caller-chosen client message ID, and refuse one that is not a positive 31-bit integer', async () => {
+  const { session, calls } = captureRequest();
+  await session.sendText('123', 'fixture', { msgId: 4242 });
+  await session.sendReply('123', 'fixture', { logId: '456', userId: '789' }, { msgId: 4243 });
+  await session.sendWithMentions('123', 'fixture', [{ userId: '789', at: [1], len: 1 }], { msgId: 4244 });
+  assert.deepEqual(calls.map(c => c.body.msgId), [4242, 4243, 4244]);
+  await session.sendText('123', 'fixture');
+  assert.ok(Number.isInteger(calls[3].body.msgId) && calls[3].body.msgId >= 0, 'random when omitted');
+  for (const msgId of [0, -1, 1.5, 0x80000000]) {
+    await assert.rejects(session.sendText('123', 'fixture', { msgId }), (e: any) => e.code === 'INVALID_ARGUMENT');
+  }
+  assert.equal(calls.length, 4, 'an invalid ID is refused before anything is written');
+});

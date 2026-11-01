@@ -47,7 +47,7 @@ function harness(t: { after(fn: () => void): void }) {
   });
   const codeOf = (ask: any) => /확인 코드 ([A-Z2-9]{4})/.exec(ask.inputRequests.approve.params.message)![1];
   const answer = (args: object, ask: any, content: object) => call(args, { requestState: ask.requestState, inputResponses: { approve: { action: 'accept', content } } });
-  return { call, codeOf, answer, rooms, reads, journal };
+  return { call, codeOf, answer, rooms, reads, journal, recipients };
 }
 
 test('one read_messages call asks once; "this time" leaves the room closed, "always" opens it', { timeout: 5000 }, async t => {
@@ -75,6 +75,24 @@ test('one read_messages call asks once; "this time" leaves the room closed, "alw
   assert.equal((await h.call(args)).isError, false, 'an opened room reads without a dialog');
   assert.equal(h.reads.length, 3); assert.equal(h.reads[2].readGrant, undefined);
   assert.equal(h.rooms.rule(OTHER).mode, 'deny', 'opening one room does not spread');
+});
+
+test('the read dialog can also allow replies to this room, and only when the person ticks it', { timeout: 5000 }, async t => {
+  const h = harness(t), args = { chatId: ROOM, limit: 5 };
+  const ask = await h.call(args);
+  const reply = ask.inputRequests.approve.params.requestedSchema.properties.reply;
+  assert.equal(reply.type, 'boolean'); assert.equal(reply.default, false);
+  assert.ok(ask.inputRequests.approve.params.message.includes('답장도 묻지 않고 보내기'));
+  assert.equal((await h.answer(args, ask, { code: h.codeOf(ask) })).isError, false);
+  assert.equal(h.recipients.list().length, 0, 'an unticked reply box grants nothing');
+
+  const again = await h.call(args);
+  assert.equal((await h.answer(args, again, { code: '', reply: true })).resultType, 'input_required', 'no code, no grant');
+  assert.equal(h.recipients.list().length, 0);
+  assert.equal((await h.answer(args, again, { code: h.codeOf(again), reply: true })).isError, false);
+  assert.equal(h.recipients.get(ROOM)?.approver, 'client:dialog-fixture');
+  assert.equal(h.recipients.get(OTHER), undefined, 'the reply permission covers only this room');
+  assert.equal(h.rooms.rule(ROOM).mode, 'deny', 'allowing replies does not open the room for reading');
 });
 
 test('without a dialog the answer names the requestId to repeat; an agent-supplied confirmRead is still refused', { timeout: 5000 }, async t => {

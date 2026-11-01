@@ -30,6 +30,7 @@ export type KakaoErrorCode =
   | 'OPERATION_EXPIRED' // approval expired before an attempt
   | 'MUTATION_OUTCOME_UNKNOWN' // a mutation may have occurred; manual resolution, never automatic repetition
   | 'SEND_OUTCOME_UNKNOWN' // publication may have succeeded; check history before retry
+  | 'SEND_NOT_DELIVERED' // history shows an attempted send never arrived; the same requestId may be sent again
   | 'CURSOR_CONFLICT' // another collector advanced the durable source checkpoint
   | 'LEASE_CONFLICT' // event lease expired, changed owner or was superseded
   | 'HISTORY_CONFLICT' // incompatible records for the same history revision
@@ -67,7 +68,8 @@ export function recoveryAdvice(code: KakaoErrorCode): { action: string; message:
     case 'NETWORK': return { action: 'diagnose_connection', message: `The connector reconnects automatically. If unavailable, run ${setupCommand('--doctor')} with the same --listen/--ssh settings. Never replay an uncertain mutation.` };
     case 'ROOM_NOT_READ': return { action: 'inspect_room_read_state', message: 'Refresh get_room_access metadata. Message access and marking read require separate permissions; never mark read automatically.' };
     case 'POLICY_DENIED': return { action: 'review_scope_with_person', message: 'Inspect the policy and room access. Request only the scope the person asked for through the client approval flow.' };
-    case 'SEND_OUTCOME_UNKNOWN':
+    case 'SEND_NOT_DELIVERED': return { action: 'retry_same_request', message: 'The room history shows this message never arrived. Call the same tool again with the same requestId to send it.' };
+    case 'SEND_OUTCOME_UNKNOWN': return { action: 'inspect_existing_operation', message: 'The daemon checks the room history after reconnecting; call the same tool again with the same requestId to see the settled outcome. Never invent a replacement ID.' };
     case 'MUTATION_OUTCOME_UNKNOWN': return { action: 'inspect_existing_operation', message: 'Inspect the operation with its existing requestId; never invent a replacement ID or automatically resend.' };
     default: return undefined;
   }

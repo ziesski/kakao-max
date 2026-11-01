@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { KakaoDb } from './db.ts';
-import { KakaoError } from './errors.ts';
+import { KakaoError, toKakaoError } from './errors.ts';
 import { isOwnerOnly, fsyncDir } from './private-fs.ts';
 import type { SendPolicy, SendCategory, RateLimitConfig } from './policy.ts';
 
@@ -22,8 +22,24 @@ export interface AgentOperationAdapter<T extends { chatId: string }> {
   connected(): boolean;
   /** Bounded locally known metadata only, not server history or message contents. */
   context(chatId: string): string;
-  send(message: T): Promise<{ status: number; logId?: string }>;
+  send(message: T, attempt?: SendAttempt): Promise<{ status: number; logId?: string }>;
+  /** The room's newest known log ID, recorded before a send so its history can be searched from there. */
+  roomCursor?(chatId: string): string | undefined;
+  /** Look for our own message with this client message ID in the room's server history after `sinceLogId`. */
+  findSent?(chatId: string, msgId: number, sinceLogId: string): Promise<{ found: true; logId: string } | { found: false; complete: boolean }>;
+  /** Wait up to `timeoutMs` for the account session to (re)connect. */
+  waitConnected?(timeoutMs: number): Promise<boolean>;
 }
+/** One send attempt: the client message ID the server echoes in the room's chat log. */
+export interface SendAttempt { msgId: number }
+/** A stable client message ID for a request: a retry with the same requestId carries the same msgId. */
+export function clientMsgIdFor(requestId: string): number {
+  return (createHash('sha256').update(`kakao-max:msgId:${requestId}`).digest().readUInt32BE(0) & 0x7fffffff) || 1;
+}
+interface AttemptRecord { chatId: string; msgId: number; since: string; at: number }
+/** How long after an attempt an absent message counts as not delivered: a slow server may still be processing it. */
+export const SETTLE_GRACE_MS = 30_000;
+const SETTLE_WAIT_MS = 10_000;
 export type AgentSendAdapter = AgentOperationAdapter<AgentMessage>;
 /** Durable human approvals (MCP client dialog or passkey page) for exact prepared envelopes. */
 export interface StoredApprovals {
@@ -76,6 +92,8 @@ export function requireApproval(o: {
 }
 export interface AgentOperationDefinition<T extends { chatId: string }> {
   domain: string; action: string; parse(input: T): T; textLength(input: T): number; requireSignature?: boolean;
+  /** A single WRITE whose failures can be told apart and whose outcome can be settled from room history. */
+  settles?: boolean;
 }
 export type AgentOperationState = 'prepared' | 'approved' | 'sending' | 'sent_unverified' | 'send_unknown' | 'expired' | 'stale' | 'applied_unverified' | 'mutation_unknown' | 'applied' | 'rejected';
 type State = AgentOperationState;
@@ -203,7 +221,33 @@ export class AgentSendJournal {
     return journalIO(() => this.db.db.prepare('UPDATE agent_send_operations SET state = ?, message_id = ? WHERE request_id = ? AND state = ?')
       .run(to, messageId, id, from).changes === 1);
   }
+  /** Content-free record of a send attempt (room, client message ID, history position, time). */
+  recordAttempt(id: string, attempt: AttemptRecord): void { journalIO(() => this.db.setMeta(`send-attempt:${id}`, JSON.stringify(attempt))); }
+  attempt(id: string): AttemptRecord | undefined {
+    const raw = journalIO(() => this.db.getMeta(`send-attempt:${id}`));
+    if (!raw) return undefined;
+    const a = JSON.parse(raw) as AttemptRecord;
+    return identity(a.chatId) && Number.isInteger(a.msgId) && typeof a.since === 'string' && Number.isSafeInteger(a.at) ? a : undefined;
+  }
+  /** Request IDs still in `state`, most recent first. */
+  inState(state: State, limit = 20): string[] {
+    return journalIO(() => (this.db.db.prepare('SELECT request_id FROM agent_send_operations WHERE state = ? ORDER BY attempted_at DESC LIMIT ?')
+      .all(state, limit) as Array<{ request_id: string }>).map(r => r.request_id));
+  }
   close(): void { this.key.fill(0); this.db.close(); }
+}
+
+/**
+ * The error to report when a text send certainly did not reach the account: no connection before writing,
+ * the server refused it, or local validation failed. A connection that closed after the WRITE was written stays uncertain.
+ */
+function sendNotApplied(error: unknown): KakaoError | undefined {
+  if (error instanceof KakaoError && error.details?.stage === 'before_send') return error;
+  const e = toKakaoError(error);
+  const notSent = (e.code === 'NOT_CONNECTED' && e.details?.locoCode !== 'CLOSED') ||
+    e.code === 'LOCO_STATUS' || e.code === 'AUTH_EXPIRED' || e.code === 'INVALID_ARGUMENT';
+  if (!notSent) return undefined;
+  return new KakaoError(e.code, `The message was not sent: ${e.message}`, { retryable: e.code !== 'INVALID_ARGUMENT', ...(e.details ? { details: e.details } : {}), cause: error });
 }
 
 export class AgentOperationService<T extends { chatId: string }> {
@@ -260,11 +304,46 @@ export class AgentOperationService<T extends { chatId: string }> {
         if (!policy.authorize(message.chatId, this.deps.definition.textLength(message)).allowed)
           throw new KakaoError('POLICY_DENIED', 'Policy changed before send claim');
       },
-      rateLimit: () => policy.describe().rateLimit, execute: () => adapter.send(message),
+      rateLimit: () => policy.describe().rateLimit,
+      execute: () => {
+        if (!this.deps.definition.settles) return adapter.send(message);
+        const attempt = { msgId: clientMsgIdFor(id) };
+        try {
+          journal.recordAttempt(id, { chatId: message.chatId, msgId: attempt.msgId, since: adapter.roomCursor?.(message.chatId) ?? '0', at: this.now() });
+        } catch (cause) {
+          throw new KakaoError('INTERNAL', 'Send attempt could not be recorded; nothing was sent', { details: { stage: 'before_send' }, cause });
+        }
+        return adapter.send(message, attempt);
+      },
+      ...(this.deps.definition.settles ? { notApplied: sendNotApplied, settle: () => this.settleAttempt(id) } : {}),
       messageId: out => out.logId ?? null, valid: out => out.status === 0 && identity(out.logId),
       done: 'sent_unverified', uncertain: 'send_unknown', unknown: () => this.unknown(),
       result: row => ({ status: 0, logId: row.message_id!, requestId: row.request_id, state: 'sent_unverified', category: row.category })
     };
+  }
+  private now(): number { return (this.deps.now ?? Date.now)(); }
+  /** Look the attempt up in the room's history: delivered, not delivered (after a grace period), or still unknown. */
+  private async settleAttempt(id: string): Promise<{ applied: true; messageId: string | null } | { applied: false } | undefined> {
+    const { journal, adapter } = this.deps, attempt = journal.attempt(id);
+    if (!attempt || !adapter.findSent) return undefined;
+    if (!(adapter.waitConnected ? await adapter.waitConnected(SETTLE_WAIT_MS) : adapter.connected())) return undefined;
+    const found = await adapter.findSent(attempt.chatId, attempt.msgId, attempt.since);
+    if (found.found) return { applied: true, messageId: found.logId };
+    return found.complete && this.now() - attempt.at >= SETTLE_GRACE_MS ? { applied: false } : undefined;
+  }
+  /**
+   * Settle uncertain sends from room history, e.g. after reconnecting. A settled send becomes `sent_unverified`
+   * or returns to `approved` (send again with the same requestId); nothing is sent here. Returns how many remain uncertain.
+   */
+  async settlePending(): Promise<number> {
+    if (!this.deps.definition.settles) return 0;
+    let remaining = 0;
+    const engine = new WriteOperationEngine(this.deps);
+    for (const id of this.deps.journal.inState('send_unknown')) {
+      const settled = await engine.settle(id, { uncertain: 'send_unknown', done: 'sent_unverified', settle: () => this.settleAttempt(id) });
+      if (!settled) remaining++;
+    }
+    return remaining;
   }
   prepare(id: string, raw: T) {
     requestId(id); const message = this.deps.definition.parse(raw);
@@ -281,6 +360,6 @@ export class AgentOperationService<T extends { chatId: string }> {
 /** Preserve the original text envelope and HMAC domain for existing prepared operations. */
 export class AgentSendService extends AgentOperationService<AgentMessage> {
   constructor(deps: { principal: string; journal: AgentSendJournal; adapter: AgentSendAdapter; policy: SendPolicy; approvals?: StoredApprovals; approvalWindow?: ApprovalWindow; recipients?: RoomSendApprovals; now?: () => number; modeApproves?: (action: string) => boolean; notifications?: boolean }) {
-    super({ ...deps, definition: { domain: POLICY_VERSION, action: 'send_message', parse: parseAgentMessage, textLength: m => m.text.length } });
+    super({ ...deps, definition: { domain: POLICY_VERSION, action: 'send_message', parse: parseAgentMessage, textLength: m => m.text.length, settles: true } });
   }
 }

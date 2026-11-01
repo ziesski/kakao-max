@@ -25,6 +25,16 @@ export interface WriteDefinition<I, O, R> {
   done: 'sent_unverified' | 'applied_unverified' | 'applied';
   uncertain: 'send_unknown' | 'mutation_unknown';
   unknown(): KakaoError;
+  /**
+   * The effect certainly did not happen (nothing was written, or the server refused it): the error to report.
+   * The operation returns to `approved`, so the same requestId can be committed again.
+   */
+  notApplied?(error: unknown): KakaoError | undefined;
+  /**
+   * Settle an uncertain attempt from the account's own history: applied (with its message ID), not applied,
+   * or undefined while it cannot be told yet.
+   */
+  settle?(row: AgentOperationRow): Promise<{ applied: true; messageId: string | null } | { applied: false } | undefined>;
   result(row: AgentOperationRow, output?: O): R;
 }
 export interface WritePrepared {
@@ -93,9 +103,24 @@ export class WriteOperationEngine {
     if (terminal) return terminal;
     return this.finishPrepare(id, d, await inspect());
   }
+  /**
+   * Try to settle an uncertain attempt. Returns the row once it is done or back to `approved` (not applied),
+   * or undefined while it stays uncertain. Only an attempt that has already returned is settled, never one in flight.
+   */
+  async settle(id: string, d: Pick<WriteDefinition<unknown, unknown, unknown>, 'uncertain' | 'done' | 'settle'>): Promise<AgentOperationRow | undefined> {
+    const row = this.journal.get(id);
+    if (!row || row.state !== d.uncertain || !d.settle) return undefined;
+    let outcome: Awaited<ReturnType<NonNullable<WriteDefinition<unknown, unknown, unknown>['settle']>>>;
+    try { outcome = await d.settle(row); } catch { return undefined; }
+    if (!outcome) return undefined;
+    const to = outcome.applied ? d.done : 'approved';
+    if (!this.journal.transition(id, d.uncertain, to, outcome.applied ? outcome.messageId : null)) return undefined;
+    return this.journal.get(id);
+  }
   async commit<I, O, R>(id: string, d: WriteDefinition<I, O, R>, inspect: () => I | Promise<I> = d.inspect): Promise<R> {
-    const row = this.row(id, d);
+    let row = this.row(id, d);
     if (!row) throw new KakaoError('APPROVAL_REQUIRED', 'Prepare this immutable operation first');
+    if (row.state === d.uncertain) row = await this.settle(id, d) ?? row;
     if (row.state === d.done) return d.result(row);
     if (['sending', 'send_unknown', 'mutation_unknown'].includes(row.state)) throw d.unknown();
     if (row.state === 'expired') throw new KakaoError('OPERATION_EXPIRED', 'Operation approval expired');
@@ -118,10 +143,20 @@ export class WriteOperationEngine {
       const messageId = d.messageId(output);
       if (!this.journal.transition(id, 'sending', d.done, messageId)) throw d.unknown();
       return d.result({ ...row, state: d.done, message_id: messageId }, output);
-    } catch {
+    } catch (error) {
+      const notApplied = d.notApplied?.(error);
+      if (notApplied) {
+        // Nothing reached the account: the approved operation can be committed again with the same requestId.
+        let restored = false;
+        try { restored = this.journal.transition(id, 'sending', 'approved'); } catch { /* recorded as uncertain below */ }
+        if (restored) throw notApplied;
+      }
       // A provider effect may already have happened, including when persisting its result failed.
       try { this.journal.transition(id, 'sending', d.uncertain); }
       catch { process.stderr.write('[operation-engine] outcome not persisted; durable attempt needs manual review\n'); }
+      const settled = await this.settle(id, d);
+      if (settled?.state === d.done) return d.result(settled);
+      if (settled) throw new KakaoError('SEND_NOT_DELIVERED', 'The message was not delivered; send again with the same requestId', { retryable: true });
       throw d.unknown();
     }
   }

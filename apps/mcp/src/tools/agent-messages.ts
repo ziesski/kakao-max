@@ -3,7 +3,7 @@ import { canonicalAgentJson, KakaoError, type KakaoSession, type AgentMessage, t
 import type { McpStdioServer } from '../mcp-stdio.ts';
 
 /** Platform adapter: existing session only, with no content read or read-receipt call. */
-export function agentMessageAdapter(kakao: Pick<KakaoSession, 'selfUserId' | 'getState' | 'listChats' | 'sendMessage' | 'sendReply' | 'sendWithMentions'>): AgentSendAdapter {
+export function agentMessageAdapter(kakao: Pick<KakaoSession, 'selfUserId' | 'getState' | 'listChats' | 'sendMessage' | 'sendReply' | 'sendWithMentions' | 'findOwnMessage' | 'waitConnected'>): AgentSendAdapter {
   return {
     accountId: () => kakao.selfUserId,
     connected: () => kakao.getState().connected,
@@ -12,13 +12,16 @@ export function agentMessageAdapter(kakao: Pick<KakaoSession, 'selfUserId' | 'ge
       if (!chat) throw new KakaoError('NOT_FOUND', 'Exact account room unavailable');
       return canonicalAgentJson({ maxLogId: chat.maxLogId, memberCount: chat.memberCount ?? null });
     },
-    send: async message => {
-      const result = message.mentions?.length ? await kakao.sendWithMentions(message.chatId, message.text, message.mentions)
+    send: async (message, attempt) => {
+      const result = message.mentions?.length ? await kakao.sendWithMentions(message.chatId, message.text, message.mentions, attempt)
         : message.replyToLogId ? await kakao.sendReply(message.chatId, message.text, {
-          logId: message.replyToLogId, userId: message.replyToUserId!, message: message.replyToText })
-        : await kakao.sendMessage(message.chatId, message.text);
+          logId: message.replyToLogId, userId: message.replyToUserId!, message: message.replyToText }, attempt)
+        : await kakao.sendMessage(message.chatId, message.text, attempt);
       return { status: result.status, logId: result.logId };
-    }
+    },
+    roomCursor: chatId => kakao.listChats().find(c => c.id === chatId)?.maxLogId ?? undefined,
+    findSent: (chatId, msgId, sinceLogId) => kakao.findOwnMessage(chatId, msgId, sinceLogId),
+    waitConnected: timeoutMs => kakao.waitConnected(timeoutMs)
   };
 }
 const fields = {
@@ -41,7 +44,9 @@ export function registerAgentMessageTools(server: McpStdioServer, service: () =>
     description: 'Send text (optionally a reply or mentions) to one exact room as the account owner. One call: in a room the person already allowed it sends at once; ' +
       'otherwise the person approves in the client dialog (or on the passkey page) and the person may allow that room for later messages and photos. ' +
       'Room scope, pause and rate limits are rechecked and the attempt is durably claimed before sending. Does not read room contents or send read receipts. ' +
-      'sent_unverified is a server acknowledgement, not delivery proof. SEND_OUTCOME_UNKNOWN is never retryable: inspect Kakao manually and never replace the requestId.',
+      'sent_unverified is a server acknowledgement, not delivery proof. A send that certainly did not happen (not connected, refused by the server) says "not sent" and may be ' +
+      'called again with the same requestId. SEND_OUTCOME_UNKNOWN means the reply was lost: the daemon checks the room history after reconnecting, so call again later with the ' +
+      'same requestId to get the settled result (sent, or SEND_NOT_DELIVERED, after which the same requestId sends it). Never replace the requestId.',
     inputSchema: { type: 'object', properties: fields, required: ['requestId','chatId','text'], additionalProperties: false },
     handler: args => {
       const message = payload(args);

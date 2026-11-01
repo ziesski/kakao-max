@@ -52,9 +52,14 @@ export function agentControlAdapter(kakao: AgentControlSession, policy: SendPoli
         case 'set_chat_meta': notPaused(action, r.chatId);
           return room(r as { chatId: string }, true, () => allowed(policy.authorize(r.chatId, 0)),
             async () => ({ status: (await kakao.setMeta(r.chatId, r.type, r.content)).status }));
-        case 'mark_read':
-          // Read receipts were never under SendPolicy; human approval is the gate.
-          return room(r as { chatId: string }, true, () => {}, async () => {
+        case 'mark_read': notPaused(action, r.chatId);
+          // A read receipt is visible to the room: pause and the operator ceiling apply, but it takes no send rate slot.
+          return room(r as { chatId: string }, true, () => {
+            if (policy.withinCeiling(r.chatId)) return;
+            const decision = policy.decide(r.chatId);
+            policy.auditRefusal(r.chatId, decision);
+            allowed(decision);
+          }, async () => {
             const out = await kakao.markRead(r.chatId, r.watermark, true);
             return { status: out.status, result: { readState: out.readState } };
           });

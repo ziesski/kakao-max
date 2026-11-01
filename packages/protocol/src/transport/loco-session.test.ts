@@ -534,3 +534,28 @@ test('media reuse keeps legacy callers unchanged and opt-in publication resolves
   assert.equal(calls.at(-1)?.body.k, 'fixture-reuse-token');
   assert.equal(calls.some(c => c.method === 'WRITE'), false);
 });
+
+test('a failed connect rejects without an unheard error event ending the process', async () => {
+  const net = await import('node:net');
+  const closed = net.createServer();
+  await new Promise<void>((r) => closed.listen(0, '127.0.0.1', () => r()));
+  const port = (closed.address() as { port: number }).port;
+  await new Promise<void>((r) => closed.close(() => r()));
+  const session = new LocoSession({ connectTimeoutMs: 500 });
+  await assert.rejects(session.connect('127.0.0.1', port, '1', 'token', 'device'));
+  session.close();
+});
+
+test('a connect that times out during login rejects without an unheard error event', async () => {
+  const net = await import('node:net');
+  const silent = net.createServer(() => {}); // accepts, then never answers LOGINLIST
+  await new Promise<void>((r) => silent.listen(0, '127.0.0.1', () => r()));
+  const port = (silent.address() as { port: number }).port;
+  const session = new LocoSession({ connectTimeoutMs: 100, requestTimeoutMs: 5000 });
+  try {
+    await assert.rejects(session.connect('127.0.0.1', port, '1', 'token', 'device'));
+  } finally {
+    session.close();
+    silent.close();
+  }
+});

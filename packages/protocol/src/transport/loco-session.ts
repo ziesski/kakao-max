@@ -275,6 +275,15 @@ export class LocoSession extends EventEmitter {
     this.onFrame = opts.onFrame;
   }
 
+  /**
+   * Report a session error to listeners. Until the session is wired (during connect and
+   * login) nobody listens, and an unheard 'error' would throw and end the process; the
+   * failure already reaches the caller through the connect promise or the request.
+   */
+  private reportError(err: Error): void {
+    if (this.listenerCount('error') > 0) this.emit('error', err);
+  }
+
   private tap(frame: LocoFrame): void {
     if (!this.onFrame) return;
     try {
@@ -342,7 +351,7 @@ export class LocoSession extends EventEmitter {
       });
 
       socket.on('data', (chunk) => this.onData(chunk));
-      socket.on('error', (err) => { this.emit('error', err); if (this.pending.size === 0) reject(err); });
+      socket.on('error', (err) => { this.reportError(err); if (this.pending.size === 0) reject(err); });
       socket.on('timeout', () => socket.destroy(new LocoError('TIMEOUT', 'carriage socket timed out')));
       socket.on('close', () => this.handleClose());
       this.socket = socket;
@@ -950,7 +959,7 @@ export class LocoSession extends EventEmitter {
       try {
         decoded = decodeLocoPacket(packetBytes);
       } catch (err) {
-        this.emit('error', err as Error);
+        this.reportError(err as Error);
         continue;
       }
       this.dispatch(decoded);

@@ -287,6 +287,15 @@ export class LocoSession extends EventEmitter {
     this.onFrame = opts.onFrame;
   }
 
+  /**
+   * Report a session error to listeners. Until the session is wired (during connect and
+   * login) nobody listens, and an unheard 'error' would throw and end the process; the
+   * failure already reaches the caller through the connect promise or the request.
+   */
+  private reportError(err: Error): void {
+    if (this.listenerCount('error') > 0) this.emit('error', err);
+  }
+
   private tap(frame: LocoFrame): void {
     if (!this.onFrame) return;
     try {

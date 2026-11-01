@@ -137,6 +137,7 @@ assert.throws(() => fs.readFileSync(secret), {code:'EACCES'});
           prompt: async (question, secret) => {
             if (secret) return 'fixture password';
             if (question.includes('자동 재로그인을 위해')) return 'n';
+            if (question.startsWith('에이전트 모드')) return '';
             if (question.includes('이메일')) return 'fixture@example.test';
             if (question.includes('시작할까요')) return 'n'; // Hard boundary: no production index/session is started.
             throw new Error('unexpected account prompt');
